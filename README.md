@@ -205,7 +205,7 @@ Lisa is a security gate, so it is built to be hard to fool or abuse:
 
 - **Everything from the PR is treated as hostile.** That covers diffs, file names, the title, the description, and comments. It is sent to Jev as data, rendered in comments only inside escaped code spans, and escaped in every workflow command it prints. A crafted file name cannot add links, mentions, fake headings, or `::` commands.
 - **Only bot-authored comments count as Lisa's.** Anyone can post Lisa's hidden markers; that cannot hide or replace its comments. The check status, not any comment, is the result.
-- **Nothing sensitive is logged.** Logs contain counts, check names, file paths, and error summaries. They never contain diff content, PR text, API response bodies, or credentials.
+- **Nothing sensitive is logged.** Logs contain counts, check names, file paths, and error summaries. They never contain diff content, PR text, API response bodies, or credentials. The API key is never printed, so pass it from a secret; GitHub masks secrets in logs.
 - **Credentials stay put.** HTTPS only. Credentials are never forwarded on a redirect to another host, and redirects away from HTTPS are refused.
 - **Lisa's code cannot be swapped out.** It runs from its own directory with `PYTHONSAFEPATH` and without user site-packages, so files in the workspace cannot shadow its modules. It has no runtime dependencies. CI tools are pinned by hash in `uv.lock`, and CI actions are pinned to commit SHAs.
 - **Jev can only answer questions.** Its output is probabilities and option keys, checked against fixed tables. No model text reaches a comment, a command, or a URL.

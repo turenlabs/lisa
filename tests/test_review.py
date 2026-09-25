@@ -130,7 +130,7 @@ def pr_event(**overrides):
 def test_flags_a_vulnerability_with_summary_inline_comment_and_failing_check(apis, make_env, tmp_path):
     logs = []
     assert run(make_env(), logs.append) == 1
-    assert "::add-mask::ts-key" in logs
+    assert not any("ts-key" in line for line in logs), "the API key is never printed"
 
     [typesafe] = apis.typesafe_requests()
     assert typesafe["headers"]["Authorization"] == "Bearer ts-key"
@@ -444,7 +444,7 @@ def test_logs_never_contain_diff_content_or_credentials(apis, make_env, capsys):
     output = "\n".join(logs)
     assert "wJalrXUtnFEMI" not in output
     assert "gh-token" not in output
-    assert [line for line in logs if "ts-key" in line] == ["::add-mask::ts-key"]
+    assert "ts-key" not in output
 
 
 def test_checked_out_pull_request_target_jobs_get_a_warning(apis, make_env, tmp_path):
