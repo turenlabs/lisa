@@ -43,8 +43,8 @@ def command(name: str, message: str = "") -> str:
 def run(env: Mapping[str, str], log: Log = print) -> int:
     """Entry point. Returns the process exit code: 1 if the PR has findings or could not be fully reviewed."""
     try:
+        # The API key is never printed, not even in ::add-mask:: (GitHub already masks secrets).
         config = load_config(env)
-        log(command("add-mask", config.api_key))
         pr = load_pull_request(config.event_path)
         if pr is None:
             log(
