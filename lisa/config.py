@@ -8,14 +8,14 @@ from dataclasses import replace
 from typing import Any
 
 from lisa.errors import ConfigError
-from lisa.models import QUESTION_TYPES, Config, CustomQuestion, PullRequest, RepoConfig
+from lisa.models import QUESTION_TYPES, SCOPES, Config, CustomQuestion, PullRequest, RepoConfig
 
 REPO_CONFIG_PATH = ".lisa.toml"
 MAX_REPO_CONFIG_BYTES = 64_000
 MAX_CUSTOM_QUESTIONS = 20
 QUESTION_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 REPO_CONFIG_FIELDS = frozenset({"threshold", "ignore", "checks", "questions"})
-QUESTION_FIELDS = frozenset({"id", "type", "question", "title", "why", "fix"})
+QUESTION_FIELDS = frozenset({"id", "type", "scope", "question", "title", "why", "fix"})
 # Settings that only make sense for one question type.
 TYPE_FIELDS = {
     "noul": frozenset({"yes_if", "no_if", "threshold"}),
@@ -124,6 +124,9 @@ def _parse_question(data: Any, where: str) -> CustomQuestion:
     if question_type not in QUESTION_TYPES:
         raise ConfigError(f"{where}.type must be one of {', '.join(QUESTION_TYPES)}, got {question_type!r}.")
     _reject_unknown(data, QUESTION_FIELDS | TYPE_FIELDS[question_type], f"{where} ({question_type})")
+    scope = data.get("scope", "diff")
+    if scope not in SCOPES:
+        raise ConfigError(f"{where}.scope must be one of {', '.join(SCOPES)}, got {scope!r}.")
 
     def text(name: str, required: bool = False) -> str:
         value = data.get(name)
@@ -143,6 +146,7 @@ def _parse_question(data: Any, where: str) -> CustomQuestion:
         question=text("question", required=True),
         title=text("title") or question_id,
         type=question_type,
+        scope=scope,
         why=text("why") or CustomQuestion.why,
         fix=text("fix") or CustomQuestion.fix,
     )

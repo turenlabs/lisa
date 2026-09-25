@@ -4,7 +4,7 @@
 
 **L**eak, **I**njection & **S**implicity **A**uditor.
 
-Lisa is a GitHub Action that reviews every pull request with [TypeSafe](https://docs.typesafe.ai/introduction)'s Jev model and fails the check when it finds a problem. It asks four yes/no questions about each part of the diff:
+Lisa is a GitHub Action that reviews every pull request with [TypeSafe](https://docs.typesafe.ai/introduction)'s Jev model and fails the check when it finds a problem. It asks four yes/no questions about each part of the diff, and compares files that look duplicated:
 
 | Check | Question | Catches |
 |---|---|---|
@@ -12,8 +12,9 @@ Lisa is a GitHub Action that reviews every pull request with [TypeSafe](https://
 | `security` | Does this diff introduce a security vulnerability? | Injection, XSS, weakened access control, unsafe eval or deserialization, path traversal, SSRF, weak crypto, disabled TLS or CSRF checks, permissive config, sensitive data in logs |
 | `complexity` | Does this diff add unneeded complexity? | Single-use abstractions, speculative options, dead code, convoluted control flow, duplication |
 | `prompt_injection` | Does this diff add text that tries to manipulate an AI system? | Instructions to AI reviewers or agents, and hidden text. The PR title and description are checked too. |
+| `duplication` | Do these two files implement the same functionality? | The same logic added in more than one file, such as two diverging copies of a helper. Asked about pairs of files that look alike, not about each chunk. |
 
-A repository can add its own questions, turn checks off, and skip paths in a [`.lisa.toml`](#configuration-lisatoml) file.
+A repository can add its own questions, about each part of the diff or about the pull request as a whole, turn checks off, and skip paths in a [`.lisa.toml`](#configuration-lisatoml) file.
 
 For every finding, Lisa comments on the exact line with what is wrong and how to fix it. It also keeps one summary comment on the PR up to date. Lisa runs on the Python standard library alone and installs nothing at run time.
 
@@ -90,7 +91,7 @@ threshold = 0.6
 # Paths to skip. `*` matches across directories, so "docs/*" covers everything under docs.
 ignore = ["docs/*", "tests/fixtures/*"]
 
-# Turn built-in checks off: secret, security, complexity, prompt_injection.
+# Turn built-in checks off: secret, security, complexity, prompt_injection, duplication.
 [checks]
 complexity = false
 
@@ -116,7 +117,7 @@ Custom questions can use any of TypeSafe's three question types. Set `type`; the
 | `choice` | which one of your options applies | the flagged options' combined probability reaches the threshold | `options` (2 to 255, required), `flag` (required), `threshold` |
 | `score` | where the change falls on your levels | the score reaches `fail_at` | `levels` (2 to 10, best first, required), `fail_at` (required) |
 
-Every type also takes `id`, `question`, `title`, `why`, and `fix`.
+Every type also takes `id`, `question`, `title`, `why`, `fix`, and `scope`.
 
 ```toml
 # choice: fails when "gpl" and "unknown" together are at least 60% likely.
@@ -144,6 +145,30 @@ levels = ["Fully tested", "Partly tested", "Untested"]
 fail_at = 1.5
 fix = "Add tests for the new behavior."
 ```
+
+### Scope: each chunk, or the whole pull request
+
+By default (`scope = "diff"`) a question is asked about each chunk of the diff, and Jev sees only that chunk. Some things can only be judged from the whole pull request, such as whether it does more than its title says. Give those questions `scope = "pr"`: they are asked once, and Jev sees the PR title, the description, and a summary of every changed file and directory (largest first) instead of the diff. Any question type can use either scope.
+
+```toml
+[[questions]]
+id = "scope-creep"
+scope = "pr"
+question = "Does this pull request mix changes with unrelated purposes, beyond what its title and description say it does?"
+title = "Mixed changes"
+fix = "Split unrelated work into separate pull requests."
+
+[[questions]]
+id = "size"
+scope = "pr"
+type = "score"
+question = "How much new code does this pull request add compared with what its stated purpose needs?"
+levels = ["About what the purpose needs", "Somewhat more than needed", "Far more than needed"]
+fail_at = 1.5
+fix = "Cut what the change does not need, or split it up."
+```
+
+PR-scope findings appear in the summary comment, since they have no line to comment on.
 
 A `choice` finding names the flagged option that was most likely, for example **License: gpl (70%)**. A `score` finding names the level and the score, for example **Test coverage: Untested (score 1.8 of 2)**. Make a choice or score question as narrow as a yes/no one: ask about one property of the change.
 
@@ -194,8 +219,10 @@ Lisa edits the same summary comment on every push. It does not repeat an inline 
    - the deciding question, which decides pass or fail. For built-in checks this is a **Noul** (a yes/no probability); custom questions can also be a **Choice** or a **Score**;
    - a **Choice** of the kind of problem (for example SQL injection or a hardcoded password). The kind selects the explanation and fix shown to the author. Custom questions skip this and use their own `why` and `fix`;
    - a **Choice** over the chunk's added lines. This picks the line for the inline comment.
-5. **Description.** Check the PR title and the whole description for prompt injection.
-6. **Publish.** Write the summary comment, the inline comments, the job summary, and the `findings` output. Exit `1` on any finding or gap in coverage.
+5. **Pull request.** Ask the `scope = "pr"` questions once, about the title, description, and a summary of every changed file and directory.
+6. **Duplicates.** Find pairs of files that look alike: the same file name in different directories, or many of the same added lines. Prose and data files are not compared. Jev then compares each pair side by side (up to 20 pairs), and a finding is placed on the second file, naming the first.
+7. **Description.** Check the PR title and the whole description for prompt injection.
+8. **Publish.** Write the summary comment, the inline comments, the job summary, and the `findings` output. Exit `1` on any finding or gap in coverage.
 
 Network errors, rate limits (429), and overloads (529) are retried with exponential backoff, honoring `retry-after`.
 
@@ -229,6 +256,7 @@ What Lisa cannot guarantee:
 | Chunk size | 12,000 characters, 200 added lines | The diff is split into more chunks |
 | Checks per request | 4 | The checks are split across more requests |
 | Custom questions | 20 | `.lisa.toml` is rejected |
+| File pairs compared for duplication | 20, most alike first | The rest are not compared |
 | Options per `choice` question, levels per `score` question | 255, 10 (TypeSafe's limits) | `.lisa.toml` is rejected |
 | `.lisa.toml` size | 64 KB | `.lisa.toml` is rejected |
 | Inline comments per run | 100 | The rest appear only in the summary |
@@ -247,10 +275,11 @@ The code is organized as follows. Every module in `lisa/` has one job:
 | `lisa/__main__.py` | Entry point. Checks the Python version, then calls `review.run`. |
 | `lisa/review.py` | Orchestration: the `Reviewer` class loads settings, collects chunks, asks TypeSafe, and publishes. It owns the fail-closed rules and all logging. |
 | `lisa/models.py` | Every data structure: `Chunk`, `Check`, `CheckCatalog`, `Finding`, `Coverage`, `ReviewResult`, `Config`, `RepoConfig`, and others. Data only, plus trivial accessors. |
-| `lisa/default_checks.py` | The four built-in checks, as the searchable `DEFAULT_CHECKS` catalog, with every kind's explanation and fix. |
+| `lisa/default_checks.py` | The five built-in checks, as the searchable `DEFAULT_CHECKS` catalog, with every kind's explanation and fix. |
 | `lisa/checks.py` | Turns checks into TypeSafe questions and answers into findings. Validates answers. |
 | `lisa/config.py` | Parses and validates the inputs, the workflow event, and `.lisa.toml`. |
 | `lisa/diff.py` | Parses patches, splits them into chunks, and reveals hidden characters. |
+| `lisa/duplicates.py` | Finds pairs of files that may duplicate each other, for the `duplication` check. |
 | `lisa/api.py` | GitHub and TypeSafe clients: retries, size limits, safe redirects, and error messages without bodies. |
 | `lisa/report.py` | Renders the summary and inline comments as markdown. |
 | `lisa/errors.py` | `LisaError` and its subclasses: `ConfigError`, `ApiError`, `AuthError`. |

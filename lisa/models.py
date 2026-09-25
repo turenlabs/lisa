@@ -40,6 +40,9 @@ class Kind:
 
 
 QUESTION_TYPES = ("noul", "choice", "score")
+# What a check is asked about: each chunk of the diff, the pull request as a whole, or pairs of
+# files that may duplicate each other (the built-in duplication check only).
+SCOPES = ("diff", "pr")
 
 
 @dataclass(frozen=True)
@@ -67,6 +70,7 @@ class Check:
     flag: tuple[str, ...] = ()  # choice: the options that fail the check
     levels: tuple[str, ...] = ()  # score: level descriptions, from best to worst
     fail_at: float | None = None  # score: the score at or above which the check fails
+    scope: str = "diff"  # "diff", "pr", or "pairs"
 
     def matches(self, term: str) -> bool:
         """Whether the term appears in the check's key, title, question, or any of its kinds."""
@@ -120,6 +124,9 @@ class CheckCatalog:
         excluded = set(keys)
         return CheckCatalog(tuple(check for check in self.checks if check.key not in excluded))
 
+    def scoped(self, scope: str) -> "CheckCatalog":
+        return CheckCatalog(tuple(check for check in self.checks if check.scope == scope))
+
     def extended(self, checks: Iterable[Check]) -> "CheckCatalog":
         return CheckCatalog(self.checks + tuple(checks))
 
@@ -133,6 +140,7 @@ class Finding:
     probability: float  # for score questions, TypeSafe's confidence in the score
     text: str = ""  # the flagged line, used to recognize the same finding across pushes
     score: float | None = None  # score questions only
+    related: str = ""  # another file involved, such as the other copy of duplicated code
 
     @property
     def located(self) -> bool:
@@ -222,6 +230,7 @@ class CustomQuestion:
     why: str = "This change matches a rule the repository defines in .lisa.toml."
     fix: str = "Change the code so this rule no longer applies, or discuss the rule with the maintainers."
     threshold: float | None = None  # noul and choice
+    scope: str = "diff"  # "diff": each chunk of the diff; "pr": the pull request as a whole
 
 
 @dataclass(frozen=True)

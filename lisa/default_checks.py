@@ -279,6 +279,29 @@ DEFAULT_CHECKS = CheckCatalog(
                 ),
             },
         ),
+        # Asked about pairs of files that code has found to look alike (same file name in different
+        # directories, or many shared lines), not about single chunks.
+        Check(
+            key="duplication",
+            title="Duplicated code",
+            instructions="Do `code_a` and `code_b` implement the same functionality?",
+            criteria={
+                "true": "The two files contain logic that does the same job, even if written differently, so one "
+                "shared implementation could replace both.",
+                "false": "The files only look alike, for example similar boilerplate, imports, or file names, but do "
+                "different jobs.",
+            },
+            line_instructions="",
+            kinds={
+                "other": Kind(
+                    "Same logic as another file",
+                    "Logic that duplicates another file in this pull request.",
+                    "Copies of the same logic drift apart: a fix or change in one copy is easily missed in the other.",
+                    "Keep one implementation in a shared place and import it from both.",
+                ),
+            },
+            scope="pairs",
+        ),
     )
 )
 

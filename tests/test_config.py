@@ -148,7 +148,12 @@ def test_every_readme_example_is_a_valid_config():
 
     readme = (Path(__file__).parent.parent / "README.md").read_text()
     examples = [parse_repo_config(text) for text in re.findall(r"```toml\n(.*?)```", readme, re.S)]
-    assert [[q.id for q in config.questions] for config in examples] == [["debug-prints"], ["license", "tests"]]
+    assert [[q.id for q in config.questions] for config in examples] == [
+        ["debug-prints"],
+        ["license", "tests"],
+        ["scope-creep", "size"],
+    ]
+    assert {q.scope for q in examples[2].questions} == {"pr"}
     assert examples[0].disabled == frozenset({"complexity"})
     assert [q.type for q in examples[1].questions] == ["choice", "score"]
 
@@ -234,3 +239,16 @@ def test_parses_score_questions():
 def test_invalid_choice_and_score_questions_are_explained(text, message):
     with pytest.raises(ConfigError, match=message):
         parse_repo_config(text)
+
+
+def test_questions_default_to_diff_scope_and_accept_pr_scope():
+    config = parse_repo_config(
+        '[[questions]]\nid = "a"\nquestion = "A?"\n'
+        '[[questions]]\nid = "b"\nscope = "pr"\ntype = "score"\nquestion = "B?"\nlevels = ["x", "y"]\nfail_at = 1\n'
+    )
+    assert [(q.id, q.scope) for q in config.questions] == [("a", "diff"), ("b", "pr")]
+
+
+def test_an_unknown_scope_is_explained():
+    with pytest.raises(ConfigError, match=r"scope must be one of diff, pr"):
+        parse_repo_config('[[questions]]\nid = "a"\nscope = "pairs"\nquestion = "A?"')

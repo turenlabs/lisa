@@ -49,7 +49,7 @@ def _code_list(items: list[str]) -> str:
 def marker(f: Finding) -> str:
     """An invisible tag identifying a finding by content rather than line number, so re-runs
     recognize findings they already commented on even after the lines moved."""
-    key = "\0".join([f.check.key, f.kind.label, f.file, f.text.strip()])
+    key = "\0".join([f.check.key, f.kind.label, f.file, f.text.strip(), f.related])
     return f"<!-- lisa:{hashlib.sha256(key.encode()).hexdigest()[:16]} -->"
 
 
@@ -57,6 +57,7 @@ def render_inline(f: Finding, model: str) -> str:
     parts = [
         marker(f),
         f"**{f.check.title}: {f.kind.label}** ({_strength(f, ' likely')})",
+        f"The same logic is in {code(f.related)}." if f.related else "",
         f.kind.why,
         f"**How to fix:** {f.kind.fix}",
         f.check.note,
@@ -67,8 +68,10 @@ def render_inline(f: Finding, model: str) -> str:
 
 def _summary_item(f: Finding, blob_url: str) -> str:
     label = f"**{f.kind.label}** ({_strength(f)})."
+    if f.related:
+        label += f" Also in {code(f.related)}."
     if not f.file:
-        where = "Pull request description:"
+        where = "Pull request description:" if f.check.key == "prompt_injection" else "Pull request:"
     else:
         where = f"[{code(f'{f.file}:{f.line}')}]({blob_url}/{quote(f.file)}#L{f.line})"
     # Findings without an inline comment carry their explanation here.
