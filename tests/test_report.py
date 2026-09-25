@@ -105,3 +105,17 @@ def test_a_crafted_file_name_cannot_break_out_of_the_summary():
         assert not line.startswith("## Lisa review: passed")
     assert "[Click to approve](https://evil.example)" in body  # present, but only inside code spans
     assert body.count("``") >= 2
+
+
+def test_score_findings_show_the_score_instead_of_a_probability():
+    from lisa.checks import custom_check
+    from lisa.models import CustomQuestion
+
+    check = custom_check(
+        CustomQuestion(id="t", question="Q?", title="Tests", type="score", levels=("Good", "Bad"), fail_at=0.5)
+    )
+    finding = Finding(check, check.kinds["level_1"], "a.py", 3, 0.8, "x = 1", score=0.9)
+    assert "**Tests: Bad** (score 0.9 of 1)" in render_inline(finding, "jev")
+    assert "**Bad** (score 0.9 of 1)." in render_summary(
+        "m", review([finding], Coverage(1, 1, 1), checks=DEFAULT_CHECKS.extended([check]))
+    )

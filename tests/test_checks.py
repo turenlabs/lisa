@@ -120,3 +120,76 @@ def test_description_check_is_the_prompt_injection_check_worded_for_the_descript
         "prompt_injection",
         "prompt_injection_kind",
     }
+
+
+LICENSE = CustomQuestion(
+    id="license",
+    question="Which license does the added code come under?",
+    title="License",
+    type="choice",
+    options={"none": "No third-party code.", "mit": "MIT.", "gpl": "GPL.", "unknown": "No clear license."},
+    flag=("gpl", "unknown"),
+)
+COVERAGE = CustomQuestion(
+    id="tests",
+    question="How well do tests cover the added code?",
+    title="Test coverage",
+    type="score",
+    levels=("Fully tested", "Partly tested", "Untested"),
+    fail_at=1.5,
+)
+
+
+def test_choice_questions_ask_a_choice_with_the_configured_options():
+    questions = questions_for(CHUNK, CheckCatalog((custom_check(LICENSE),)))
+    assert questions["custom_license"] == {
+        "type": "choice",
+        "instructions": LICENSE.question,
+        "criteria": LICENSE.options,
+    }
+    assert "custom_license_kind" not in questions and "custom_license_line" in questions
+
+
+def test_score_questions_ask_a_score_with_the_configured_levels():
+    questions = questions_for(CHUNK, CheckCatalog((custom_check(COVERAGE),)))
+    assert questions["custom_tests"] == {
+        "type": "score",
+        "instructions": COVERAGE.question,
+        "criteria": ["Fully tested", "Partly tested", "Untested"],
+    }
+
+
+def choice_answer(**probabilities):
+    return {"custom_license": {"type": "choice", "probabilities": probabilities}}
+
+
+def test_a_choice_question_fails_on_the_combined_probability_of_flagged_options():
+    checks = CheckCatalog((custom_check(LICENSE),))
+    # Neither flagged option wins on its own, but together they are likely.
+    [finding] = findings_for(CHUNK, choice_answer(none=0.4, mit=0.0, gpl=0.35, unknown=0.25), checks, 0.5)
+    assert finding.probability == pytest.approx(0.6)
+    assert finding.kind.label == "gpl"
+    assert findings_for(CHUNK, choice_answer(none=0.9, mit=0.05, gpl=0.03, unknown=0.02), checks, 0.5) == []
+
+
+def test_a_score_question_fails_at_or_above_fail_at():
+    checks = CheckCatalog((custom_check(COVERAGE),))
+    [finding] = findings_for(CHUNK, {"custom_tests": {"score": 1.8, "confidence": 0.7}}, checks, 0.5)
+    assert (finding.score, finding.probability, finding.kind.label) == (1.8, 0.7, "Untested")
+    assert findings_for(CHUNK, {"custom_tests": {"score": 1.2, "confidence": 0.9}}, checks, 0.5) == []
+
+
+@pytest.mark.parametrize(
+    "check, answer",
+    [
+        (LICENSE, {"custom_license": {"choice": "gpl"}}),
+        (LICENSE, choice_answer(none=1.0)),
+        (LICENSE, choice_answer(gpl="high", unknown=0.1)),
+        (COVERAGE, {"custom_tests": {"score": 7}}),
+        (COVERAGE, {"custom_tests": {"score": "bad"}}),
+        (COVERAGE, {}),
+    ],
+)
+def test_invalid_choice_and_score_answers_are_errors_not_passes(check, answer):
+    with pytest.raises(ApiError, match="no valid answer"):
+        findings_for(CHUNK, answer, CheckCatalog((custom_check(check),)), 0.5)

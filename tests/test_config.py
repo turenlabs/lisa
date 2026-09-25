@@ -142,11 +142,95 @@ def test_repo_config_limits_its_size():
         parse_repo_config("# " + "x" * 70_000)
 
 
-def test_the_readme_example_is_a_valid_config():
+def test_every_readme_example_is_a_valid_config():
     import re
     from pathlib import Path
 
     readme = (Path(__file__).parent.parent / "README.md").read_text()
-    config = parse_repo_config(re.search(r"```toml\n(.*?)```", readme, re.S).group(1))
-    assert config.disabled == frozenset({"complexity"})
-    assert [q.id for q in config.questions] == ["debug-prints"]
+    examples = [parse_repo_config(text) for text in re.findall(r"```toml\n(.*?)```", readme, re.S)]
+    assert [[q.id for q in config.questions] for config in examples] == [["debug-prints"], ["license", "tests"]]
+    assert examples[0].disabled == frozenset({"complexity"})
+    assert [q.type for q in examples[1].questions] == ["choice", "score"]
+
+
+CHOICE = """
+[[questions]]
+id = "license"
+type = "choice"
+question = "Which license does the code added in this diff come under?"
+flag = ["gpl", "unknown"]
+threshold = 0.6
+
+[questions.options]
+none = "No third-party code is added."
+mit = "MIT or another permissive license."
+gpl = "GPL or another copyleft license."
+unknown = "Copied code with no clear license."
+"""
+
+SCORE = """
+[[questions]]
+id = "tests"
+type = "score"
+question = "How well do tests in this diff cover the code it adds?"
+levels = ["Fully tested", "Partly tested", "Untested"]
+fail_at = 1.5
+"""
+
+
+def test_parses_choice_questions():
+    [question] = parse_repo_config(CHOICE).questions
+    assert question.type == "choice"
+    assert list(question.options) == ["none", "mit", "gpl", "unknown"]
+    assert (question.flag, question.threshold) == (("gpl", "unknown"), 0.6)
+
+
+def test_parses_score_questions():
+    [question] = parse_repo_config(SCORE).questions
+    assert (question.type, question.levels, question.fail_at) == (
+        "score",
+        ("Fully tested", "Partly tested", "Untested"),
+        1.5,
+    )
+
+
+@pytest.mark.parametrize(
+    "text, message",
+    [
+        ('[[questions]]\nid = "x"\ntype = "poll"\nquestion = "Q?"', "type must be one of noul, choice, score"),
+        ('[[questions]]\nid = "x"\nquestion = "Q?"\nlevels = ["a", "b"]', r"unknown setting.*levels"),
+        (
+            '[[questions]]\nid = "x"\ntype = "score"\nquestion = "Q?"\nlevels = ["a", "b"]\nfail_at = 1\nyes_if = "y"',
+            r"unknown setting.*yes_if",
+        ),
+        ('[[questions]]\nid = "x"\ntype = "choice"\nquestion = "Q?"\nflag = ["a"]', r"options must be a table"),
+        (
+            '[[questions]]\nid = "x"\ntype = "choice"\nquestion = "Q?"\nflag = ["a"]\n[questions.options]\na = "A"',
+            r"options must be a table of 2",
+        ),
+        (
+            '[[questions]]\nid = "x"\ntype = "choice"\nquestion = "Q?"\n[questions.options]\na = "A"\nb = "B"',
+            r"flag must list",
+        ),
+        (
+            '[[questions]]\nid = "x"\ntype = "choice"\nquestion = "Q?"\nflag = ["c"]\n'
+            '[questions.options]\na = "A"\nb = "B"',
+            r"flag names option\(s\) not in .*: c",
+        ),
+        (
+            '[[questions]]\nid = "x"\ntype = "choice"\nquestion = "Q?"\nflag = ["a", "b"]\n'
+            '[questions.options]\na = "A"\nb = "B"',
+            r"could never pass",
+        ),
+        (
+            '[[questions]]\nid = "x"\ntype = "score"\nquestion = "Q?"\nlevels = ["only"]\nfail_at = 1',
+            r"levels must list 2",
+        ),
+        ('[[questions]]\nid = "x"\ntype = "score"\nquestion = "Q?"\nlevels = ["a", "b"]', r"fail_at must be"),
+        ('[[questions]]\nid = "x"\ntype = "score"\nquestion = "Q?"\nlevels = ["a", "b"]\nfail_at = 2', r"at most 1"),
+        ('[[questions]]\nid = "x"\ntype = "score"\nquestion = "Q?"\nlevels = ["a", "b"]\nfail_at = 0', r"fail_at"),
+    ],
+)
+def test_invalid_choice_and_score_questions_are_explained(text, message):
+    with pytest.raises(ConfigError, match=message):
+        parse_repo_config(text)

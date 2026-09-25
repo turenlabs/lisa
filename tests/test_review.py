@@ -473,3 +473,41 @@ def test_config_errors_fail_with_a_single_error_line(apis, make_env, inputs, mes
 def test_non_pull_request_events_are_skipped(apis, make_env):
     assert run(make_env(event={"push": {}}), lambda _: None) == 0
     assert apis.calls == []
+
+
+def test_choice_and_score_custom_questions_run_end_to_end(apis, make_env):
+    apis.contents[(".lisa.toml", "base1")] = b"""
+[[questions]]
+id = "license"
+type = "choice"
+question = "Which license does the added code come under?"
+flag = ["gpl"]
+[questions.options]
+none = "No third-party code."
+gpl = "GPL."
+
+[[questions]]
+id = "tests"
+type = "score"
+question = "How well do tests cover the added code?"
+levels = ["Fully tested", "Partly tested", "Untested"]
+fail_at = 1.5
+"""
+
+    def answer_for(payload):
+        answers = {}
+        if "custom_license" in payload["questions"]:
+            answers["custom_license"] = {"type": "choice", "probabilities": {"none": 0.2, "gpl": 0.8}}
+        if "custom_tests" in payload["questions"]:
+            answers["custom_tests"] = {"type": "score", "score": 1.9, "confidence": 0.8}
+        return answers
+
+    apis.answer_for = answer_for
+    assert run(make_env(), lambda _: None) == 1
+    questions = {k: v for r in apis.typesafe_requests() for k, v in r["payload"]["questions"].items()}
+    assert questions["custom_license"]["type"] == "choice"
+    assert questions["custom_tests"]["type"] == "score"
+    [summary] = apis.find("POST", "/issues/7/comments")
+    body = summary["payload"]["body"]
+    assert "| license | **1 found** |" in body and "| tests | **1 found** |" in body
+    assert "**gpl** (80%)" in body and "**Untested** (score 1.9 of 2)" in body

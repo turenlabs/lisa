@@ -39,20 +39,34 @@ class Kind:
     fix: str  # shown to the author: what to do
 
 
+QUESTION_TYPES = ("noul", "choice", "score")
+
+
 @dataclass(frozen=True)
 class Check:
-    """A yes/no question asked about every chunk of the diff, plus up to two follow-ups asked in
-    the same request: which kind of problem it is and which added line it is on."""
+    """A question asked about every chunk of the diff that decides pass or fail, plus up to two
+    follow-ups asked in the same request: which kind of problem it is and which added line it is on.
+
+    The deciding question is one of TypeSafe's three types:
+    - "noul": yes/no; fails when the probability of yes reaches the threshold.
+    - "choice": one of `options`; fails when the combined probability of the `flag` options
+      reaches the threshold.
+    - "score": a position on `levels` (0 = first level); fails when the score reaches `fail_at`."""
 
     key: str
     title: str
     instructions: str
-    criteria: dict[str, str]  # optional descriptions of what "true" and "false" mean
+    criteria: dict[str, str]  # noul only: optional descriptions of what "true" and "false" mean
     line_instructions: str
-    kinds: dict[str, Kind]  # must include "other"; with only "other", no kind question is asked
-    kind_instructions: str = ""
+    kinds: dict[str, Kind]  # must include "other"
+    kind_instructions: str = ""  # without it, no kind follow-up is asked
     note: str = ""  # extra advice added to every comment for this check
-    threshold: float | None = None  # overrides the review-wide threshold
+    threshold: float | None = None  # noul and choice: overrides the review-wide threshold
+    question_type: str = "noul"
+    options: dict[str, str] = field(default_factory=dict)  # choice: option -> description
+    flag: tuple[str, ...] = ()  # choice: the options that fail the check
+    levels: tuple[str, ...] = ()  # score: level descriptions, from best to worst
+    fail_at: float | None = None  # score: the score at or above which the check fails
 
     def matches(self, term: str) -> bool:
         """Whether the term appears in the check's key, title, question, or any of its kinds."""
@@ -116,8 +130,9 @@ class Finding:
     kind: Kind
     file: str  # empty for findings in the pull request description
     line: int
-    probability: float
+    probability: float  # for score questions, TypeSafe's confidence in the score
     text: str = ""  # the flagged line, used to recognize the same finding across pushes
+    score: float | None = None  # score questions only
 
     @property
     def located(self) -> bool:
@@ -191,16 +206,22 @@ class PullRequest:
 
 @dataclass(frozen=True)
 class CustomQuestion:
-    """A repository's own yes/no question from .lisa.toml, asked about every chunk of the diff."""
+    """A repository's own question from .lisa.toml, asked about every chunk of the diff.
+    See Check for how each question type decides pass or fail."""
 
     id: str
     question: str
     title: str
-    yes_if: str = ""
-    no_if: str = ""
+    type: str = "noul"
+    yes_if: str = ""  # noul
+    no_if: str = ""  # noul
+    options: dict[str, str] = field(default_factory=dict)  # choice
+    flag: tuple[str, ...] = ()  # choice
+    levels: tuple[str, ...] = ()  # score
+    fail_at: float | None = None  # score
     why: str = "This change matches a rule the repository defines in .lisa.toml."
-    fix: str = "Change the code so the answer to this question is no, or discuss the rule with the maintainers."
-    threshold: float | None = None
+    fix: str = "Change the code so this rule no longer applies, or discuss the rule with the maintainers."
+    threshold: float | None = None  # noul and choice
 
 
 @dataclass(frozen=True)

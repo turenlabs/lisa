@@ -34,6 +34,13 @@ def _percent(p: float) -> str:
     return f"{round(p * 100)}%"
 
 
+def _strength(f: Finding, likely: str = "") -> str:
+    """How strongly the finding holds: a probability, or the score for score questions."""
+    if f.score is not None:
+        return f"score {f.score:.1f} of {len(f.check.levels) - 1}"
+    return f"{_percent(f.probability)}{likely}"
+
+
 def _code_list(items: list[str]) -> str:
     shown = ", ".join(code(item) for item in items[:MAX_LISTED])
     return shown + (f" and {len(items) - MAX_LISTED:,} more" if len(items) > MAX_LISTED else "")
@@ -49,7 +56,7 @@ def marker(f: Finding) -> str:
 def render_inline(f: Finding, model: str) -> str:
     parts = [
         marker(f),
-        f"**{f.check.title}: {f.kind.label}** ({_percent(f.probability)} likely)",
+        f"**{f.check.title}: {f.kind.label}** ({_strength(f, ' likely')})",
         f.kind.why,
         f"**How to fix:** {f.kind.fix}",
         f.check.note,
@@ -59,7 +66,7 @@ def render_inline(f: Finding, model: str) -> str:
 
 
 def _summary_item(f: Finding, blob_url: str) -> str:
-    label = f"**{f.kind.label}** ({_percent(f.probability)})."
+    label = f"**{f.kind.label}** ({_strength(f)})."
     if not f.file:
         where = "Pull request description:"
     else:
