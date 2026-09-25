@@ -1,6 +1,6 @@
-name: Lisa
-description: Leak, Injection & Simplicity Auditor. Flags secrets, security vulnerabilities, and unneeded complexity in pull requests using TypeSafe.
-author: Lisa
+name: Lisa PR Review
+description: Fails pull requests that add secrets, security flaws, unneeded complexity, or prompt injection, using TypeSafe.
+author: Turen Labs
 branding:
   icon: shield
   color: purple
