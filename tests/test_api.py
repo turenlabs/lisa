@@ -4,6 +4,7 @@ import pytest
 
 from lisa import api
 from lisa.errors import ApiError, AuthError
+from lisa.models import Response
 
 
 @pytest.fixture
@@ -22,7 +23,7 @@ def respond_with(monkeypatch):
                 raise item
             status, body, *headers_ = item
             raw = body if isinstance(body, bytes) else json.dumps(body).encode()
-            return api.Response(status, headers_[0] if headers_ else {}, raw)
+            return Response(status, headers_[0] if headers_ else {}, raw)
 
         monkeypatch.setattr(api, "send", fake_send)
         return calls
@@ -69,7 +70,7 @@ def test_unauthorized_is_an_auth_error(respond_with):
 def test_non_json_body_is_an_api_error(respond_with):
     respond_with((200, b"<html>"))
     with pytest.raises(ApiError, match="Expected JSON"):
-        client().request("GET", "/").json()
+        api.parse_json(client().request("GET", "/"))
 
 
 def test_typesafe_ask_posts_the_request_and_returns_answers(respond_with):

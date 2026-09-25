@@ -1,31 +1,14 @@
 """Renders review results as GitHub-flavored markdown."""
 
 import hashlib
-from dataclasses import dataclass, field
 from urllib.parse import quote
 
-from lisa.checks import CHECKS, Finding
+from lisa.models import CheckCatalog, Coverage, Finding
 
 # GitHub rejects comments longer than 65,536 characters.
 MAX_COMMENT_CHARS = 60_000
 # Lists of skipped files and failed chunks are cut off after this many entries.
 MAX_LISTED = 20
-
-
-@dataclass
-class Coverage:
-    """How much of the pull request was actually reviewed."""
-
-    files_changed: int = 0
-    files_reviewed: int = 0
-    chunks: int = 0
-    files_unlisted: int = 0  # beyond what GitHub's files API returns
-    too_large: list[str] = field(default_factory=list)
-    failed: list[str] = field(default_factory=list)  # files or "path:line" chunks that could not be reviewed
-
-    @property
-    def complete(self) -> bool:
-        return not (self.files_unlisted or self.too_large or self.failed)
 
 
 def _plural(n: int, word: str) -> str:
@@ -60,8 +43,17 @@ def render_inline(f: Finding, model: str) -> str:
     return "\n\n".join(part for part in parts if part)
 
 
+def _summary_item(f: Finding, blob_url: str) -> str:
+    if not f.file:
+        # No inline comment is possible on the description, so the explanation goes here.
+        return f"- Pull request description: **{f.kind.label}** ({_percent(f.probability)}). {f.kind.why} {f.kind.fix}"
+    location = f"[`{f.file}:{f.line}`]({blob_url}/{quote(f.file)}#L{f.line})"
+    return f"- {location} **{f.kind.label}** ({_percent(f.probability)}). {f.kind.fix}"
+
+
 def render_summary(
     comment_marker: str,
+    checks: CheckCatalog,
     findings: list[Finding],
     coverage: Coverage,
     model: str,
@@ -71,8 +63,8 @@ def render_summary(
     passed = not findings and coverage.complete
     head = [comment_marker, f"## Lisa review: {'passed' if passed else 'changes needed'}", ""]
     head += ["| Check | Result |", "|---|---|"]
-    for check in CHECKS:
-        n = sum(f.check is check for f in findings)
+    for check in checks:
+        n = sum(f.check.key == check.key for f in findings)
         head.append(f"| {check.title} | {f'**{n} found**' if n else 'Clear'} |")
     head += [
         "",
@@ -103,13 +95,10 @@ def render_summary(
     body: list[str] = []
     budget = max_chars - len("\n".join(head + tail)) - 200
     omitted = 0
-    for check in CHECKS:
+    for check in checks:
         section = ["", f"### {check.title}", ""]
-        for f in (f for f in findings if f.check is check):
-            item = (
-                f"- [`{f.file}:{f.line}`]({blob_url}/{quote(f.file)}#L{f.line}) "
-                f"**{f.kind.label}** ({_percent(f.probability)}). {f.kind.fix}"
-            )
+        for f in (f for f in findings if f.check.key == check.key):
+            item = _summary_item(f, blob_url)
             cost = len(item) + sum(len(line) + 1 for line in section)
             if cost > budget:
                 omitted += 1

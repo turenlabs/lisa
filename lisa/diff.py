@@ -1,6 +1,9 @@
+"""Parses GitHub patches and splits them into chunks for review."""
+
 import difflib
 import re
-from dataclasses import dataclass
+
+from lisa.models import Chunk, Line
 
 # Jev loses accuracy on large states full of unrelated detail, so each request
 # sees a small slice of one file's diff.
@@ -11,6 +14,9 @@ MAX_CHUNK_ADDED = 200
 MAX_LINE_CHARS = 1_000
 
 HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+# Characters people cannot see: zero-width, bidirectional overrides, and Unicode tags (used to
+# smuggle hidden text). They are made visible so hidden instructions can be judged.
+INVISIBLE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\U000e0000-\U000e007f]")
 
 SKIPPED = [
     re.compile(
@@ -28,23 +34,12 @@ SKIPPED = [
 ]
 
 
-@dataclass
-class Line:
-    kind: str  # '+' added, '-' removed, ' ' context, '@' gap between hunks
-    text: str
-    number: int | None  # line number in the new file; None for removed lines
-
-
-@dataclass
-class Chunk:
-    file: str
-    diff: str
-    added: list[Line]
-    start_line: int
-
-
 def should_skip(filename: str) -> bool:
     return any(pattern.search(filename) for pattern in SKIPPED)
+
+
+def reveal_invisible(text: str) -> str:
+    return INVISIBLE.sub(lambda match: f"<U+{ord(match[0]):04X}>", text)
 
 
 def unified_patch(old: str, new: str) -> str:
@@ -65,7 +60,7 @@ def parse_patch(patch: str) -> list[list[Line]]:
             hunk = []
             hunks.append(hunk)
         elif hunk is not None and raw and not raw.startswith("\\"):
-            text = raw[1 : MAX_LINE_CHARS + 1]
+            text = reveal_invisible(raw[1:])[:MAX_LINE_CHARS]
             if raw[0] == "-":
                 hunk.append(Line("-", text, None))
             else:
@@ -78,7 +73,7 @@ def _make_chunk(file: str, lines: list[Line]) -> Chunk:
     added = [line for line in lines if line.kind == "+"]
     numbered = [line.number for line in (added or lines) if line.number is not None]
     diff = "\n".join("@@" if line.kind == "@" else f"{line.kind} {line.text}" for line in lines)
-    return Chunk(file=file, diff=diff, added=added, start_line=numbered[0] if numbered else 1)
+    return Chunk(file=file, diff=diff, added=tuple(added), start_line=numbered[0] if numbered else 1)
 
 
 def chunk_file(

@@ -1,4 +1,4 @@
-from lisa.diff import MAX_LINE_CHARS, chunk_file, parse_patch, should_skip, unified_patch
+from lisa.diff import MAX_LINE_CHARS, chunk_file, parse_patch, reveal_invisible, should_skip, unified_patch
 
 PATCH = """@@ -10,3 +10,4 @@ def a():
  x = 1
@@ -59,3 +59,10 @@ def test_should_skip_lockfiles_binaries_minified_and_vendored():
     for name in ["package-lock.json", "web/yarn.lock", "uv.lock", "static/app.min.js", "vendor/x.go", "logo.PNG"]:
         assert should_skip(name), name
     assert not should_skip("src/lock.py")
+
+
+def test_invisible_characters_are_made_visible():
+    hidden = "ok()  # \u200b\u202eevil\U000e0041"
+    assert reveal_invisible(hidden) == "ok()  # <U+200B><U+202E>evil<U+E0041>"
+    [[line]] = parse_patch("@@ -0,0 +1 @@\n+" + hidden)
+    assert line.text == "ok()  # <U+200B><U+202E>evil<U+E0041>"

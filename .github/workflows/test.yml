@@ -19,4 +19,16 @@ jobs:
       - uses: astral-sh/setup-uv@v10.2.0
       - run: uvx ruff check lisa tests
       - run: uvx ruff format --check lisa tests
-      - run: uv run --python ${{ matrix.python }} --with pytest --no-project pytest -q
+      - run: uv run --python ${{ matrix.python }} --with pytest --with pyyaml --no-project pytest -q
+
+  # Runs the action's PyYAML install exactly as action.yml does, but unconditionally, so the
+  # fallback path is proven on the runner's externally managed system Python.
+  action-dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          python3 -m pip install --quiet --disable-pip-version-check --only-binary=:all: \
+            --target "$RUNNER_TEMP/lisa-python" "PyYAML==6.0.3"
+          PYTHONPATH="$RUNNER_TEMP/lisa-python" python3 -c "import yaml; print('PyYAML', yaml.__version__, 'from', yaml.__file__)"
+        env:
+          PIP_BREAK_SYSTEM_PACKAGES: "1"

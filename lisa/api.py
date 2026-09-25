@@ -4,32 +4,19 @@ import json
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
 from urllib.parse import quote
 
 from lisa.errors import ApiError, AuthError
+from lisa.models import Response
 
 RETRYABLE_STATUSES = {408, 429, 500, 502, 503, 504, 529}
 
 
-@dataclass
-class Response:
-    status: int
-    headers: dict[str, str]
-    body: bytes
-
-    @property
-    def ok(self) -> bool:
-        return 200 <= self.status < 300
-
-    def text(self) -> str:
-        return self.body.decode("utf-8", errors="replace")
-
-    def json(self):
-        try:
-            return json.loads(self.body)
-        except ValueError as error:
-            raise ApiError(f"Expected JSON but got: {self.text()[:200]}", self.status) from error
+def parse_json(response: Response):
+    try:
+        return response.json()
+    except ValueError as error:
+        raise ApiError(f"Expected JSON but got: {response.text()[:200]}", response.status) from error
 
 
 def send(method: str, url: str, headers: dict[str, str], payload=None, timeout: float = 120) -> Response:
@@ -101,7 +88,8 @@ class TypeSafe(JsonClient):
 
     def ask(self, state: dict, questions: dict) -> tuple[str, dict]:
         """Asks System One the questions about the state. Returns the model that answered and its answers."""
-        data = self.request("POST", "/systemone", {"model": self.model, "state": state, "questions": questions}).json()
+        payload = {"model": self.model, "state": state, "questions": questions}
+        data = parse_json(self.request("POST", "/systemone", payload))
         if not isinstance(data, dict) or not isinstance(data.get("answers"), dict):
             raise ApiError(f"TypeSafe returned no answers: {str(data)[:200]}")
         return data.get("model") or self.model, data["answers"]
@@ -130,7 +118,7 @@ class GitHub(JsonClient):
         items: list[dict] = []
         page = 1
         while True:
-            batch = self.request("GET", f"{path}?per_page=100&page={page}").json()
+            batch = parse_json(self.request("GET", f"{path}?per_page=100&page={page}"))
             if not isinstance(batch, list):
                 raise ApiError(f"GitHub GET {path} returned {type(batch).__name__}, expected a list")
             items += batch

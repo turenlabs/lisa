@@ -1,17 +1,24 @@
+"""Runs a review: load settings, collect the diff, ask TypeSafe, publish the results."""
+
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 
 from lisa.api import GitHub, TypeSafe
-from lisa.checks import Finding, findings_for, questions_for, state_for
-from lisa.config import Config, PullRequest
-from lisa.diff import Chunk, chunk_file, should_skip, unified_patch
+from lisa.checks import DEFAULT_THRESHOLD, DESCRIPTION, build_checks, findings_for, questions_for, state_for
+from lisa.config import REPO_CONFIG_PATH, load_config, load_pull_request, parse_repo_config
+from lisa.default_checks import DESCRIPTION_CHECK
+from lisa.diff import chunk_file, reveal_invisible, should_skip, unified_patch
 from lisa.errors import ApiError, AuthError, LisaError
-from lisa.report import Coverage, marker, render_inline, render_summary
+from lisa.models import CheckCatalog, Chunk, Config, Coverage, Finding, PullRequest, RepoConfig
+from lisa.report import marker, render_inline, render_summary
 
 SUMMARY_MARKER = "<!-- lisa-review -->"
 CONCURRENCY = 8
 # Files whose diff GitHub omits are rebuilt from their contents; beyond this size they are skipped.
 MAX_FILE_BYTES = 1_000_000
+# Each check adds up to three questions to a request; batching keeps requests well inside Jev's context.
+CHECKS_PER_REQUEST = 4
+MAX_DESCRIPTION_CHARS = 20_000
 REVIEW_BATCH = 50
 JOB_SUMMARY_CHARS = 900_000
 
@@ -21,9 +28,9 @@ Log = Callable[[str], None]
 def run(env: Mapping[str, str], log: Log = print) -> int:
     """Entry point. Returns the process exit code: 1 if the PR has findings or could not be fully reviewed."""
     try:
-        config = Config.from_env(env)
+        config = load_config(env)
         log(f"::add-mask::{config.api_key}")
-        pr = PullRequest.from_event(config.event_path)
+        pr = load_pull_request(config.event_path)
         if pr is None:
             log("::notice::Lisa reviews pull requests; this event has no pull request, so there is nothing to do.")
             return 0
@@ -43,28 +50,49 @@ class Reviewer:
         self.typesafe = TypeSafe(config.api_key, config.model)
         self.coverage = Coverage(files_changed=pr.changed_files)
         self.model = config.model  # replaced by the exact version TypeSafe reports
+        self.repo_config = RepoConfig()
+        self.checks = build_checks(self.repo_config)
+        self.threshold = config.threshold or DEFAULT_THRESHOLD
 
     def run(self) -> int:
+        self.load_repo_config()
         chunks = self.collect_chunks()
         self.log(f"Reviewing {self.coverage.files_reviewed} files in {len(chunks)} chunks with {self.config.model}.")
-        findings = self.review(chunks)
+        findings = self.review(chunks) + self.review_description()
         self.publish(findings)
 
         if findings or self.coverage.failed:
             problems = [f"{len(findings)} issue(s)"] if findings else []
             if self.coverage.failed:
-                problems.append(f"{len(self.coverage.failed)} part(s) of the diff that could not be reviewed")
+                problems.append(f"{len(self.coverage.failed)} part(s) of the pull request that could not be reviewed")
             self.log(f"::error::Lisa found {' and '.join(problems)}.")
             return 1
         self.log("Lisa found no issues.")
         return 0
+
+    def load_repo_config(self):
+        """Reads .lisa.yml from the base branch, never from the pull request, so a pull request
+        cannot switch off the checks that would catch it."""
+        content = self.github.file_content(REPO_CONFIG_PATH, self.pr.base)
+        if content is None:
+            return
+        self.repo_config = parse_repo_config(content.decode("utf-8", "replace"))
+        self.checks = build_checks(self.repo_config)
+        self.threshold = self.config.threshold or self.repo_config.threshold or DEFAULT_THRESHOLD
+        self.log(f"Using {REPO_CONFIG_PATH} from the base branch: checks {', '.join(self.checks.keys())}.")
 
     def collect_chunks(self) -> list[Chunk]:
         files = self.github.list_files(self.pr.number)
         self.coverage.files_changed = max(self.coverage.files_changed, len(files))
         if len(files) >= GitHub.MAX_LISTED_FILES:
             self.coverage.files_unlisted = self.coverage.files_changed - len(files)
-        candidates = [f for f in files if f.get("status") != "removed" and not should_skip(f.get("filename", ""))]
+        candidates = [
+            f
+            for f in files
+            if f.get("status") != "removed"
+            and not should_skip(f.get("filename", ""))
+            and not self.repo_config.ignores(f.get("filename", ""))
+        ]
 
         chunks: list[Chunk] = []
         with ThreadPoolExecutor(CONCURRENCY) as pool:
@@ -113,33 +141,54 @@ class Reviewer:
 
     def _review_chunk(self, chunk: Chunk) -> list[Finding] | None:
         """The chunk's findings, or None if it could not be reviewed. A rejected key stops the whole review."""
+        findings: list[Finding] = []
+        checks = list(self.checks)
+        for start in range(0, len(checks), CHECKS_PER_REQUEST):
+            batch = CheckCatalog(tuple(checks[start : start + CHECKS_PER_REQUEST]))
+            try:
+                self.model, answers = self.typesafe.ask(state_for(chunk), questions_for(chunk, batch))
+            except AuthError:
+                raise
+            except ApiError as error:
+                self.log(f"::warning::Could not review {chunk.file}:{chunk.start_line}: {error}")
+                return None
+            findings += findings_for(chunk, answers, batch, self.threshold)
+        return findings
+
+    def review_description(self) -> list[Finding]:
+        """Checks the pull request title and description for prompt injection."""
+        if "prompt_injection" not in self.checks or not (self.pr.title or self.pr.body):
+            return []
+        state = {
+            "title": reveal_invisible(self.pr.title),
+            "description": reveal_invisible(self.pr.body[:MAX_DESCRIPTION_CHARS]) or "(empty)",
+        }
+        check = CheckCatalog((DESCRIPTION_CHECK,))
         try:
-            self.model, answers = self.typesafe.ask(state_for(chunk), questions_for(chunk))
+            self.model, answers = self.typesafe.ask(state, questions_for(DESCRIPTION, check))
         except AuthError:
             raise
         except ApiError as error:
-            self.log(f"::warning::Could not review {chunk.file}:{chunk.start_line}: {error}")
-            return None
-        return findings_for(chunk, answers, self.config.threshold)
+            self.log(f"::warning::Could not review the pull request description: {error}")
+            self.coverage.failed.append("pull request description")
+            return []
+        return findings_for(DESCRIPTION, answers, check, self.threshold)
 
     def publish(self, findings: list[Finding]):
         blob_url = f"{self.config.server_url}/{self.config.repo}/blob/{self.pr.head}"
-        summary = render_summary(SUMMARY_MARKER, findings, self.coverage, self.model, blob_url, JOB_SUMMARY_CHARS)
-        _append(self.config.summary_path, summary)
+        summary_args = (SUMMARY_MARKER, self.checks, findings, self.coverage, self.model, blob_url)
+        _append(self.config.summary_path, render_summary(*summary_args, max_chars=JOB_SUMMARY_CHARS))
         _append(self.config.output_path, f"findings={len(findings)}\n")
         try:
-            comment = render_summary(SUMMARY_MARKER, findings, self.coverage, self.model, blob_url)
-            self.github.upsert_comment(self.pr.number, SUMMARY_MARKER, comment)
-            self._post_inline_comments(findings)
+            self.github.upsert_comment(self.pr.number, SUMMARY_MARKER, render_summary(*summary_args))
+            self._post_inline_comments([f for f in findings if f.file])
         except ApiError as error:
             # A read-only token (for example on fork PRs) cannot comment; the job summary still has the results.
             self.log(f"::warning::Could not post review comments: {error}")
 
     def _post_inline_comments(self, findings: list[Finding]):
         """Comments on each flagged line, skipping findings an earlier run already commented on."""
-        seen = set()
-        for body in self.github.review_comment_bodies(self.pr.number):
-            seen.add(body.split("\n", 1)[0])
+        seen = {body.split("\n", 1)[0] for body in self.github.review_comment_bodies(self.pr.number)}
         comments = []
         for f in findings:
             if marker(f) not in seen:

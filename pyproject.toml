@@ -3,7 +3,7 @@ name = "lisa"
 version = "1.0.0"
 description = "GitHub Action that reviews pull requests for unneeded complexity, security issues, and secrets using TypeSafe."
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["PyYAML>=6"]
 
 [dependency-groups]
 dev = ["pytest>=8"]
