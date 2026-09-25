@@ -3,6 +3,7 @@ name = "lisa"
 version = "1.0.0"
 description = "GitHub Action that reviews pull requests for secrets, security vulnerabilities, unneeded complexity, and prompt injection using TypeSafe."
 requires-python = ">=3.11"
+license = "MIT"
 # Lisa runs on the Python standard library alone. Keep it that way.
 dependencies = []
 

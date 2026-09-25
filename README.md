@@ -294,3 +294,7 @@ These rules keep Lisa safe. Tests and CI enforce most of them:
 - `kinds` that include `"other"`, each with a `why` and a `fix`.
 
 `tests/test_models.py` checks that every kind is complete.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
