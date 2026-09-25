@@ -21,10 +21,6 @@ inputs:
     description: Probability (0-1) at which Jev's answer counts as "yes" and fails the PR.
     required: false
     default: "0.5"
-  comment:
-    description: Post (and keep updating) a summary comment on the pull request.
-    required: false
-    default: "true"
 
 outputs:
   findings:
@@ -43,4 +39,3 @@ runs:
         INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
         INPUT_MODEL: ${{ inputs.model }}
         INPUT_THRESHOLD: ${{ inputs.threshold }}
-        INPUT_COMMENT: ${{ inputs.comment }}

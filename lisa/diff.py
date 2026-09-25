@@ -81,7 +81,9 @@ def _make_chunk(file: str, lines: list[Line]) -> Chunk:
     return Chunk(file=file, diff=diff, added=added, start_line=numbered[0] if numbered else 1)
 
 
-def chunk_file(file: str, patch: str, max_chars: int = MAX_CHUNK_CHARS, max_added: int = MAX_CHUNK_ADDED) -> list[Chunk]:
+def chunk_file(
+    file: str, patch: str, max_chars: int = MAX_CHUNK_CHARS, max_added: int = MAX_CHUNK_ADDED
+) -> list[Chunk]:
     """Splits a file's patch into chunks of at most max_chars and max_added added lines,
     keeping hunks together where they fit. Chunks with no added or removed lines are dropped."""
     chunks: list[Chunk] = []

@@ -15,8 +15,8 @@ PATCH = """@@ -10,3 +10,4 @@ def a():
 
 def test_parse_patch_tracks_new_file_line_numbers():
     first, second = parse_patch(PATCH)
-    assert [(l.kind, l.number) for l in first] == [(" ", 10), ("-", None), ("+", 11), ("+", 12), (" ", 13)]
-    assert [(l.kind, l.number) for l in second] == [(" ", 41), ("-", None), ("+", 42)]
+    assert [(line.kind, line.number) for line in first] == [(" ", 10), ("-", None), ("+", 11), ("+", 12), (" ", 13)]
+    assert [(line.kind, line.number) for line in second] == [(" ", 41), ("-", None), ("+", 42)]
 
 
 def test_parse_patch_truncates_enormous_lines():
@@ -27,7 +27,7 @@ def test_parse_patch_truncates_enormous_lines():
 def test_chunk_file_keeps_small_hunks_together():
     [chunk] = chunk_file("a.py", PATCH)
     assert chunk.start_line == 11
-    assert [l.number for l in chunk.added] == [11, 12, 42]
+    assert [line.number for line in chunk.added] == [11, 12, 42]
     assert chunk.diff.startswith("  x = 1\n- y = 2\n+ y = 3")
     assert "\n@@\n" in chunk.diff
 
@@ -37,7 +37,7 @@ def test_chunk_file_splits_by_size_without_losing_lines():
     patch = "@@ -0,0 +1,50 @@\n" + "\n".join(lines) + "\n " + "context " * 20
     chunks = chunk_file("big.py", patch, max_chars=1000)
     assert len(chunks) > 1
-    assert [l.number for c in chunks for l in c.added] == list(range(1, 51))
+    assert [line.number for c in chunks for line in c.added] == list(range(1, 51))
     assert all(len(c.diff) <= 1000 for c in chunks)
     assert all(c.added for c in chunks), "context-only chunks are dropped"
 
@@ -52,7 +52,7 @@ def test_chunk_file_caps_added_lines_per_chunk():
 def test_unified_patch_rebuilds_a_parseable_patch():
     patch = unified_patch("a\nb\nc\n", "a\nB\nc\nd\n")
     [chunk] = chunk_file("f.py", patch)
-    assert [(l.number, l.text) for l in chunk.added] == [(2, "B"), (4, "d")]
+    assert [(line.number, line.text) for line in chunk.added] == [(2, "B"), (4, "d")]
 
 
 def test_should_skip_lockfiles_binaries_minified_and_vendored():

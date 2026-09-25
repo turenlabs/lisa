@@ -17,4 +17,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.2.0
+      - run: uvx ruff check lisa tests
+      - run: uvx ruff format --check lisa tests
       - run: uv run --python ${{ matrix.python }} --with pytest --no-project pytest -q

@@ -45,7 +45,6 @@ That's all. No checkout step is needed: Lisa reads the diff through the GitHub A
 |---|---|---|
 | `api-key` | | **Required.** Your TypeSafe API key. |
 | `threshold` | `0.5` | Probability at which Jev's answer counts as "yes" and fails the PR. Raise it (for example to `0.8`) to flag only clear-cut cases. |
-| `comment` | `true` | Post the summary and inline comments. With `false`, results only appear in annotations and the job summary. |
 | `model` | `jev-latest` | TypeSafe model. Pin a version such as `jev-1.13.0` to keep results stable. |
 | `github-token` | `${{ github.token }}` | Token used to read the diff and write comments. |
 
@@ -76,7 +75,7 @@ The summary comment shows a table with each check marked Clear or N found, a lin
 
 ## Notes
 
-- **Fork PRs:** GitHub does not pass secrets to workflows triggered from forks, so Lisa exits with a "missing `api-key`" error there. Fork PRs also get a read-only token. If commenting fails, Lisa prints a warning and still reports through annotations and the job summary.
+- **Fork PRs:** GitHub does not pass secrets to `pull_request` workflows from forks, so Lisa fails with a "missing `api-key`" error there. Public repos that accept fork PRs should trigger on `pull_request_target` instead. That is safe for Lisa because it never checks out or runs PR code, so **do not add a checkout step** to that job. If commenting fails (for example with a read-only token), Lisa prints a warning and the results are still in the job summary.
 - **Data:** diff contents are sent to the TypeSafe API. See TypeSafe's [data handling](https://docs.typesafe.ai/models#data-handling) policy.
 - **Runner:** needs `python3` 3.10 or newer, which GitHub-hosted runners include. There are no dependencies to install.
 - Jev judges each chunk of the diff on its own, without the rest of the codebase.

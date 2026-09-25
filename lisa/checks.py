@@ -6,6 +6,8 @@ DIFF_FORMAT = (
     "Unified diff of one file. Lines starting with '+' were added, lines starting with '-' were removed, "
     "other lines are unchanged context. '@@' separates distant parts of the file."
 )
+# Choice option text is trimmed; the start of a line is enough to identify it.
+MAX_OPTION_CHARS = 200
 
 
 @dataclass(frozen=True)
@@ -17,20 +19,67 @@ class Kind:
 
 
 @dataclass(frozen=True)
+class Finding:
+    check: "Check"
+    kind: Kind
+    file: str
+    line: int
+    probability: float
+    text: str = ""  # the flagged line, used to recognize the same finding across pushes
+
+
+@dataclass(frozen=True)
 class Check:
+    """One yes/no question asked about every chunk of the diff, plus two follow-ups asked in the
+    same request: which kind of problem it is (which picks the explanation and fix shown to the
+    author) and which added line it is on (where the inline comment goes)."""
+
+    key: str
     title: str
     instructions: str
     criteria: dict[str, str]
     kind_instructions: str
     line_instructions: str
     kinds: dict[str, Kind]
+    note: str = ""  # extra advice added to every comment for this check
+
+    def questions(self, line_options: dict[str, str]) -> dict[str, dict]:
+        questions = {
+            self.key: {"type": "noul", "instructions": self.instructions, "criteria": self.criteria},
+            f"{self.key}_kind": {
+                "type": "choice",
+                "instructions": self.kind_instructions,
+                "criteria": {name: kind.criteria for name, kind in self.kinds.items()},
+            },
+        }
+        if len(line_options) > 1:
+            questions[f"{self.key}_line"] = {
+                "type": "choice",
+                "instructions": self.line_instructions,
+                "criteria": line_options,
+            }
+        return questions
+
+    def finding(self, chunk: Chunk, answers: dict, threshold: float) -> Finding | None:
+        """A finding if Jev answered yes (probability at or above threshold), otherwise None."""
+        probability = _answer(answers, self.key).get("noul")
+        if not isinstance(probability, (int, float)) or probability < threshold:
+            return None
+        kind = self.kinds.get(_answer(answers, f"{self.key}_kind").get("choice"), self.kinds["other"])
+        line = _answer(answers, f"{self.key}_line").get("choice")
+        number = int(line) if isinstance(line, str) and line.isdigit() else chunk.start_line
+        text = next((added.text for added in chunk.added if added.number == number), "")
+        return Finding(self, kind, chunk.file, number, float(probability), text)
 
 
-# Every check is asked about every chunk of the diff in one request: a yes/no gate,
-# which kind of problem it is, and which added line it is on. The kind selects the
-# explanation and fix shown in the review comment.
-CHECKS = {
-    "secret": Check(
+def _answer(answers: dict, key: str) -> dict:
+    answer = answers.get(key)
+    return answer if isinstance(answer, dict) else {}
+
+
+CHECKS = (
+    Check(
+        key="secret",
         title="Secret",
         instructions="Does this diff add a secret?",
         criteria={
@@ -39,6 +88,7 @@ CHECKS = {
             "false": "No real credentials are added. Placeholders, example values, test fixtures, and references "
             "to environment variables or secret stores are not secrets.",
         },
+        note="Deleting the line in a later commit is not enough: the secret stays in the git history, so rotate it.",
         kind_instructions="What kind of secret do the added lines in `diff` contain?",
         line_instructions="Which added line in `diff` contains the secret?",
         kinds={
@@ -90,7 +140,8 @@ CHECKS = {
             ),
         },
     ),
-    "security": Check(
+    Check(
+        key="security",
         title="Security vulnerability",
         instructions="Does this diff introduce a security vulnerability?",
         criteria={
@@ -156,8 +207,7 @@ CHECKS = {
                 "Weak cryptography",
                 "Weak or broken cryptography, such as MD5 or SHA-1 for passwords, ECB mode, a hardcoded IV or "
                 "salt, or a non-cryptographic random generator for tokens or keys.",
-                "Weak algorithms and predictable randomness let attackers crack hashes, decrypt data, or guess "
-                "tokens.",
+                "Weak algorithms and predictable randomness let attackers crack hashes, decrypt data, or guess tokens.",
                 "Hash passwords with bcrypt, scrypt, or Argon2; use an authenticated cipher such as AES-GCM with "
                 "random nonces; generate tokens with a cryptographically secure random source.",
             ),
@@ -166,8 +216,7 @@ CHECKS = {
                 "TLS certificate verification, signature verification, or CSRF protection is turned off.",
                 "Without verification, attackers on the network can intercept or forge traffic, or trick users "
                 "into submitting requests they did not intend.",
-                "Keep verification on. For internal certificates, trust the specific CA instead of disabling "
-                "checks.",
+                "Keep verification on. For internal certificates, trust the specific CA instead of disabling checks.",
             ),
             "insecure_config": Kind(
                 "Permissive security configuration",
@@ -192,7 +241,8 @@ CHECKS = {
             ),
         },
     ),
-    "complexity": Check(
+    Check(
+        key="complexity",
         title="Unneeded complexity",
         instructions="Does this diff add unneeded complexity?",
         criteria={
@@ -206,8 +256,7 @@ CHECKS = {
         kinds={
             "over_abstraction": Kind(
                 "Unnecessary abstraction",
-                "An interface, base class, factory, wrapper, or generic parameter with a single use and no "
-                "clear need.",
+                "An interface, base class, factory, wrapper, or generic parameter with a single use and no clear need.",
                 "Abstractions with one implementation add indirection readers have to follow without making "
                 "the code more flexible in any way that is used today.",
                 "Inline it and use the concrete code directly. Introduce the abstraction when a second real use "
@@ -216,8 +265,7 @@ CHECKS = {
             "speculative_options": Kind(
                 "Speculative configuration",
                 "Options, flags, parameters, or extension points that nothing uses yet.",
-                "Every option is a code path to test and maintain, and unused ones mostly add ways to break "
-                "things.",
+                "Every option is a code path to test and maintain, and unused ones mostly add ways to break things.",
                 "Remove the options nothing needs yet and hardcode the value that is actually used.",
             ),
             "dead_code": Kind(
@@ -232,8 +280,7 @@ CHECKS = {
                 "Deeply nested conditionals or loops, or roundabout logic, where a straightforward version would "
                 "do the same thing.",
                 "Nested and roundabout logic is harder to read, test, and change safely.",
-                "Flatten it with early returns and guard clauses, or split the logic into small, well-named "
-                "functions.",
+                "Flatten it with early returns and guard clauses, or split the logic into small, well-named functions.",
             ),
             "duplication": Kind(
                 "Duplicated logic",
@@ -249,68 +296,18 @@ CHECKS = {
             ),
         },
     ),
-}
+)
 
 
-@dataclass
-class Finding:
-    check: str
-    kind: str
-    file: str
-    line: int
-    probability: float
-    text: str = ""  # the flagged line, used to recognize the same finding across pushes
-
-    @property
-    def title(self) -> str:
-        return CHECKS[self.check].title
-
-    @property
-    def details(self) -> Kind:
-        return CHECKS[self.check].kinds[self.kind]
+def state_for(chunk: Chunk) -> dict:
+    return {"file": chunk.file, "diff_format": DIFF_FORMAT, "diff": chunk.diff}
 
 
-def build_request(chunk: Chunk, model: str) -> dict:
-    questions = {}
-    line_options = {str(line.number): line.text.strip()[:200] or "(blank line)" for line in chunk.added}
-    for key, check in CHECKS.items():
-        questions[key] = {"type": "noul", "instructions": check.instructions, "criteria": check.criteria}
-        questions[f"{key}_kind"] = {
-            "type": "choice",
-            "instructions": check.kind_instructions,
-            "criteria": {name: kind.criteria for name, kind in check.kinds.items()},
-        }
-        if len(line_options) > 1:
-            questions[f"{key}_line"] = {
-                "type": "choice",
-                "instructions": check.line_instructions,
-                "criteria": line_options,
-            }
-    return {
-        "model": model,
-        "state": {"file": chunk.file, "diff_format": DIFF_FORMAT, "diff": chunk.diff},
-        "questions": questions,
-    }
+def questions_for(chunk: Chunk) -> dict[str, dict]:
+    """Every check's questions about the chunk, to be asked in a single request."""
+    line_options = {str(line.number): line.text.strip()[:MAX_OPTION_CHARS] or "(blank line)" for line in chunk.added}
+    return {key: question for check in CHECKS for key, question in check.questions(line_options).items()}
 
 
-def interpret(chunk: Chunk, answers: dict, threshold: float) -> list[Finding]:
-    """Every check answered yes (probability at or above threshold) is a finding."""
-    findings = []
-    for key, check in CHECKS.items():
-        probability = answers.get(key, {}).get("noul", 0)
-        if probability < threshold:
-            continue
-        kind = answers.get(f"{key}_kind", {}).get("choice")
-        line = answers.get(f"{key}_line", {}).get("choice")
-        number = int(line) if line else chunk.start_line
-        findings.append(
-            Finding(
-                check=key,
-                kind=kind if kind in check.kinds else "other",
-                file=chunk.file,
-                line=number,
-                probability=probability,
-                text=next((l.text for l in chunk.added if l.number == number), ""),
-            )
-        )
-    return findings
+def findings_for(chunk: Chunk, answers: dict, threshold: float) -> list[Finding]:
+    return [finding for check in CHECKS if (finding := check.finding(chunk, answers, threshold))]
