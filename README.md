@@ -1,5 +1,7 @@
 # Lisa
 
+**L**eak, **I**njection & **S**implicity **A**uditor.
+
 A GitHub Action that asks [TypeSafe](https://docs.typesafe.ai/introduction)'s Jev model three questions about every part of a pull request's diff:
 
 - **Does this diff add a secret?**

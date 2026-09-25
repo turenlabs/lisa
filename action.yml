@@ -1,5 +1,5 @@
 name: Lisa
-description: Review pull requests for unneeded complexity, security issues, and leaked secrets using TypeSafe.
+description: Leak, Injection & Simplicity Auditor. Flags secrets, security vulnerabilities, and unneeded complexity in pull requests using TypeSafe.
 author: Lisa
 branding:
   icon: shield
