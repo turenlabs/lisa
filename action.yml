@@ -3,7 +3,7 @@ description: Fails pull requests that add secrets, security flaws, unneeded comp
 author: Turen Labs
 branding:
   icon: shield
-  color: purple
+  color: blue
 
 inputs:
   api-key:
