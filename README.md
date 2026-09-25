@@ -1,3 +1,7 @@
+<p align="center">
+  <img src=".github/lisa-logo.png" alt="Lisa logo: an illustrated cat with the word LISA" width="480">
+</p>
+
 # Lisa
 
 **L**eak, **I**njection & **S**implicity **A**uditor.
