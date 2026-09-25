@@ -7,14 +7,24 @@ escaped so text from the pull request (such as a file name) cannot inject comman
 import os
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 
 from lisa.api import GitHub, TypeSafe
-from lisa.checks import DEFAULT_THRESHOLD, DESCRIPTION, build_checks, findings_for, questions_for, state_for
+from lisa.checks import (
+    DEFAULT_THRESHOLD,
+    PULL_REQUEST,
+    build_checks,
+    findings_for,
+    pr_state,
+    questions_for,
+    state_for,
+)
 from lisa.config import REPO_CONFIG_PATH, load_config, load_pull_request, parse_repo_config
 from lisa.default_checks import DESCRIPTION_CHECK
 from lisa.diff import chunk_file, reveal_invisible, should_skip, unified_patch
+from lisa.duplicates import candidate_pairs, pair_state
 from lisa.errors import ApiError, AuthError, LisaError
-from lisa.models import CheckCatalog, Chunk, Config, Coverage, Finding, PullRequest, RepoConfig, ReviewResult
+from lisa.models import CheckCatalog, Chunk, Config, Coverage, Finding, Line, PullRequest, RepoConfig, ReviewResult
 from lisa.report import marker, render_inline, render_summary
 
 SUMMARY_MARKER = "<!-- lisa-review -->"
@@ -91,6 +101,8 @@ class Reviewer:
         self.checks = build_checks(self.repo_config)
         self.threshold = config.threshold or DEFAULT_THRESHOLD
         self.settings = "defaults"
+        self.files: list[dict] = []  # every changed file, as GitHub lists them
+        self.added: dict[str, list[Line]] = {}  # added lines of each reviewed file
 
     def warn(self, message: str):
         self.log(command("warning", message))
@@ -98,9 +110,11 @@ class Reviewer:
     def run(self) -> int:
         self.load_repo_config()
         chunks = self.collect_chunks()
-        self.check_budget(chunks)
+        pairs = candidate_pairs(self.added) if "duplication" in self.checks else []
+        self.check_budget(chunks, pairs)
         self.log(f"Reviewing {self.coverage.files_reviewed} files in {len(chunks)} chunks with {self.config.model}.")
-        findings = self.review(chunks) + self.review_description()
+        findings = self.review(chunks) + self.review_pull_request() + self.review_duplicates(pairs)
+        findings += self.review_description()
         self.publish(findings)
 
         if findings or not self.coverage.complete:
@@ -125,7 +139,7 @@ class Reviewer:
         self.log(f"Using {REPO_CONFIG_PATH} from the base branch: checks {', '.join(self.checks.keys())}.")
 
     def collect_chunks(self) -> list[Chunk]:
-        files = self.github.list_files(self.pr.number)
+        files = self.files = self.github.list_files(self.pr.number)
         # A push during the review would make the listing describe a different commit.
         if self.github.head_sha(self.pr.number) != self.pr.head:
             raise LisaError(
@@ -149,6 +163,8 @@ class Reviewer:
                 if patch is not None:
                     self.coverage.files_reviewed += 1
                     chunks += chunk_file(f["filename"], patch)
+        for chunk in chunks:
+            self.added.setdefault(chunk.file, []).extend(chunk.added)
         self.coverage.chunks = len(chunks)
         return chunks
 
@@ -183,15 +199,32 @@ class Reviewer:
             return ""
         return unified_patch(old.decode("utf-8", "replace"), new.decode("utf-8", "replace"))
 
-    def check_budget(self, chunks: list[Chunk]):
-        batches = -(-len(self.checks) // CHECKS_PER_REQUEST)
-        needed = len(chunks) * batches + len(self._description_pieces())
+    def check_budget(self, chunks: list[Chunk], pairs: list[tuple[str, str]]):
+        def requests(checks: CheckCatalog) -> int:
+            return -(-len(checks) // CHECKS_PER_REQUEST)
+
+        needed = (
+            len(chunks) * requests(self.checks.scoped("diff"))
+            + requests(self.checks.scoped("pr"))
+            + len(pairs)
+            + len(self._description_pieces())
+        )
         if needed > MAX_REQUESTS:
             raise LisaError(
                 f"Reviewing this pull request needs {needed:,} TypeSafe requests, more than the limit of "
                 f"{MAX_REQUESTS:,}. Split it into smaller pull requests, or skip generated paths with `ignore` "
                 f"in {REPO_CONFIG_PATH}."
             )
+
+    def _ask(self, state: dict, chunk: Chunk, checks: CheckCatalog) -> list[Finding]:
+        """Asks the checks about one state, a few checks per request. Raises ApiError if any
+        request fails or any answer is invalid, so the caller can mark the state not reviewed."""
+        findings: list[Finding] = []
+        for start in range(0, len(checks), CHECKS_PER_REQUEST):
+            batch = CheckCatalog(checks.checks[start : start + CHECKS_PER_REQUEST])
+            self.model, answers = self.typesafe.ask(state, questions_for(chunk, batch))
+            findings += findings_for(chunk, answers, batch, self.threshold)
+        return findings
 
     def review(self, chunks: list[Chunk]) -> list[Finding]:
         findings: list[Finding] = []
@@ -205,18 +238,54 @@ class Reviewer:
 
     def _review_chunk(self, chunk: Chunk) -> list[Finding] | None:
         """The chunk's findings, or None if it could not be reviewed. A rejected key stops the whole review."""
-        findings: list[Finding] = []
-        checks = list(self.checks)
-        for start in range(0, len(checks), CHECKS_PER_REQUEST):
-            batch = CheckCatalog(tuple(checks[start : start + CHECKS_PER_REQUEST]))
+        try:
+            return self._ask(state_for(chunk), chunk, self.checks.scoped("diff"))
+        except AuthError:
+            raise
+        except ApiError as error:
+            self.warn(f"Could not review {chunk.file}:{chunk.start_line}: {error}")
+            return None
+
+    def review_pull_request(self) -> list[Finding]:
+        """Asks the PR-scope questions from .lisa.toml once, about the pull request as a whole."""
+        checks = self.checks.scoped("pr")
+        if not checks:
+            return []
+        try:
+            return self._ask(pr_state(self.pr.title, self.pr.body, self.files), PULL_REQUEST, checks)
+        except AuthError:
+            raise
+        except ApiError as error:
+            self.warn(f"Could not review the pull request as a whole: {error}")
+            self.coverage.failed.append("pull request")
+            return []
+
+    def review_duplicates(self, pairs: list[tuple[str, str]]) -> list[Finding]:
+        """Asks Jev whether each candidate pair of files implements the same thing. A finding is
+        placed on the second file and names the first."""
+        if not pairs:
+            return []
+        check = CheckCatalog((self.checks["duplication"],))
+
+        def compare(pair: tuple[str, str]) -> list[Finding] | None:
+            a, b = pair
+            added = tuple(self.added[b])
+            target = Chunk(file=b, diff="", added=added, start_line=added[0].number or 1)
             try:
-                self.model, answers = self.typesafe.ask(state_for(chunk), questions_for(chunk, batch))
-                findings += findings_for(chunk, answers, batch, self.threshold)
+                return [replace(f, related=a) for f in self._ask(pair_state(a, b, self.added), target, check)]
             except AuthError:
                 raise
             except ApiError as error:
-                self.warn(f"Could not review {chunk.file}:{chunk.start_line}: {error}")
+                self.warn(f"Could not compare {a} with {b}: {error}")
                 return None
+
+        findings: list[Finding] = []
+        with ThreadPoolExecutor(CONCURRENCY) as pool:
+            for (a, b), result in zip(pairs, pool.map(compare, pairs), strict=True):
+                if result is None:
+                    self.coverage.failed.append(f"{a} and {b}")
+                else:
+                    findings += result
         return findings
 
     def _description_pieces(self) -> list[str]:
@@ -231,8 +300,7 @@ class Reviewer:
         for piece in self._description_pieces():
             state = {"title": reveal_invisible(self.pr.title), "description": piece or "(empty)"}
             try:
-                self.model, answers = self.typesafe.ask(state, questions_for(DESCRIPTION, check))
-                findings = findings_for(DESCRIPTION, answers, check, self.threshold)
+                findings = self._ask(state, PULL_REQUEST, check)
             except AuthError:
                 raise
             except ApiError as error:

@@ -4,8 +4,10 @@ A missing or invalid answer to a deciding question is an error, never a pass: tr
 "no problem" would pass code nobody reviewed."""
 
 import math
+from collections import defaultdict
 
 from lisa.default_checks import DEFAULT_CHECKS
+from lisa.diff import reveal_invisible
 from lisa.errors import ApiError, ConfigError
 from lisa.models import Check, CheckCatalog, Chunk, CustomQuestion, Finding, Kind, RepoConfig
 
@@ -17,8 +19,13 @@ DIFF_FORMAT = (
 # Choice option text is trimmed; the start of a line is enough to identify it.
 MAX_OPTION_CHARS = 200
 DEFAULT_THRESHOLD = 0.5
-# The pull request description, as a chunk, so description findings flow through the same code.
-DESCRIPTION = Chunk(file="", diff="", added=(), start_line=0)
+# The pull request as a whole, as a chunk, so findings about it flow through the same code.
+PULL_REQUEST = Chunk(file="", diff="", added=(), start_line=0)
+# How much of the pull request PR-scope questions see: enough to judge its scope, small enough
+# for Jev's context.
+MAX_PR_DESCRIPTION_CHARS = 8_000
+MAX_PR_FILES = 150
+MAX_PR_DIRECTORIES = 40
 
 
 def custom_check(question: CustomQuestion) -> Check:
@@ -45,6 +52,7 @@ def custom_check(question: CustomQuestion) -> Check:
         flag=question.flag,
         levels=question.levels,
         fail_at=question.fail_at,
+        scope=question.scope,
     )
 
 
@@ -155,6 +163,43 @@ def _score(answer: dict, check: Check) -> float:
 def _answer(answers: dict, key: str) -> dict:
     answer = answers.get(key)
     return answer if isinstance(answer, dict) else {}
+
+
+def pr_state(title: str, body: str, files: list[dict]) -> dict:
+    """The pull request as a whole, for PR-scope questions: what it says it does, and what it
+    changes, by directory and by file (largest changes first)."""
+
+    def churn(f: dict) -> int:
+        return int(f.get("additions") or 0) + int(f.get("deletions") or 0)
+
+    directories: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0])
+    for f in files:
+        parts = str(f.get("filename", "")).split("/")[:-1]
+        totals = directories["/".join(parts[:3]) or "(root)"]
+        totals[0] += 1
+        totals[1] += int(f.get("additions") or 0)
+        totals[2] += int(f.get("deletions") or 0)
+    by_size = sorted(directories.items(), key=lambda item: -(item[1][1] + item[1][2]))
+    largest = sorted(files, key=churn, reverse=True)
+
+    description = reveal_invisible(body)
+    if len(description) > MAX_PR_DESCRIPTION_CHARS:
+        description = description[:MAX_PR_DESCRIPTION_CHARS] + "\n(truncated)"
+    return {
+        "title": reveal_invisible(title),
+        "description": description or "(empty)",
+        "summary": f"{len(files)} files changed, "
+        f"{sum(int(f.get('additions') or 0) for f in files)} lines added, "
+        f"{sum(int(f.get('deletions') or 0) for f in files)} lines removed",
+        "directories": [f"{path}: {n} files, +{added} -{removed}" for path, (n, added, removed) in by_size][
+            :MAX_PR_DIRECTORIES
+        ],
+        "files": [
+            f"{f.get('status', 'changed')} +{f.get('additions', 0)} -{f.get('deletions', 0)} {f.get('filename', '')}"
+            for f in largest[:MAX_PR_FILES]
+        ]
+        + ([f"(and {len(files) - MAX_PR_FILES} smaller files)"] if len(files) > MAX_PR_FILES else []),
+    }
 
 
 def state_for(chunk: Chunk) -> dict:

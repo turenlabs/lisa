@@ -11,8 +11,10 @@ def check(key: str, **kinds: Kind) -> Check:
 
 
 def test_default_catalog_has_the_built_in_checks_in_order():
-    assert DEFAULT_CHECKS.keys() == ["secret", "security", "complexity", "prompt_injection"]
-    assert len(DEFAULT_CHECKS) == 4
+    assert DEFAULT_CHECKS.keys() == ["secret", "security", "complexity", "prompt_injection", "duplication"]
+    assert len(DEFAULT_CHECKS) == 5
+    assert DEFAULT_CHECKS.scoped("diff").keys() == ["secret", "security", "complexity", "prompt_injection"]
+    assert DEFAULT_CHECKS.scoped("pairs").keys() == ["duplication"]
 
 
 def test_catalog_lookup_by_key():
@@ -46,7 +48,8 @@ def test_catalog_rejects_duplicate_keys_and_checks_without_other():
 
 def test_every_default_check_has_explanations_for_each_kind():
     for default in DEFAULT_CHECKS:
-        assert default.kind_instructions and default.line_instructions
+        if default.scope == "diff":
+            assert default.kind_instructions and default.line_instructions
         for kind in default.kinds.values():
             assert kind.label and kind.criteria and kind.why and kind.fix
 

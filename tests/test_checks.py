@@ -2,7 +2,7 @@ from dataclasses import replace
 
 import pytest
 
-from lisa.checks import DESCRIPTION, build_checks, custom_check, findings_for, questions_for, state_for
+from lisa.checks import PULL_REQUEST, build_checks, custom_check, findings_for, questions_for, state_for
 from lisa.default_checks import DEFAULT_CHECKS, DESCRIPTION_CHECK
 from lisa.errors import ApiError, ConfigError
 from lisa.models import CheckCatalog, Chunk, CustomQuestion, Line, RepoConfig
@@ -26,8 +26,8 @@ def test_state_holds_the_file_and_its_diff():
 
 
 def test_each_default_check_asks_a_gate_kind_and_line_question():
-    questions = questions_for(CHUNK, DEFAULT_CHECKS)
-    for check in DEFAULT_CHECKS:
+    questions = questions_for(CHUNK, DEFAULT_CHECKS.scoped("diff"))
+    for check in DEFAULT_CHECKS.scoped("diff"):
         gate = questions[check.key]
         assert gate["type"] == "noul"
         assert gate["instructions"] == check.instructions
@@ -57,7 +57,7 @@ def test_custom_question_criteria_are_included_when_given():
 
 def test_build_checks_disables_and_adds_checks():
     checks = build_checks(RepoConfig(disabled=frozenset({"complexity"}), questions=(DEBUG,)))
-    assert checks.keys() == ["secret", "security", "prompt_injection", "custom_debug-prints"]
+    assert checks.keys() == ["secret", "security", "prompt_injection", "duplication", "custom_debug-prints"]
 
 
 def test_build_checks_rejects_unknown_check_names():
@@ -116,7 +116,7 @@ def test_a_missing_or_invalid_yes_no_answer_is_an_error_not_a_pass(gate):
 def test_description_check_is_the_prompt_injection_check_worded_for_the_description():
     assert DESCRIPTION_CHECK.key == "prompt_injection"
     assert "`description`" in DESCRIPTION_CHECK.instructions
-    assert set(questions_for(DESCRIPTION, CheckCatalog((DESCRIPTION_CHECK,)))) == {
+    assert set(questions_for(PULL_REQUEST, CheckCatalog((DESCRIPTION_CHECK,)))) == {
         "prompt_injection",
         "prompt_injection_kind",
     }
@@ -193,3 +193,29 @@ def test_a_score_question_fails_at_or_above_fail_at():
 def test_invalid_choice_and_score_answers_are_errors_not_passes(check, answer):
     with pytest.raises(ApiError, match="no valid answer"):
         findings_for(CHUNK, answer, CheckCatalog((custom_check(check),)), 0.5)
+
+
+def test_custom_checks_keep_their_scope():
+    assert custom_check(replace(DEBUG, scope="pr")).scope == "pr"
+    assert custom_check(DEBUG).scope == "diff"
+
+
+def test_pr_state_summarizes_the_whole_pull_request():
+    from lisa.checks import MAX_PR_FILES, pr_state
+
+    files = [{"filename": f"docs/page{i}.md", "status": "added", "additions": i, "deletions": 0} for i in range(200)]
+    files.append({"filename": "tools/lib/git.ts", "status": "added", "additions": 500, "deletions": 0})
+    state = pr_state("docs: tidy", "Moves pages.​", files)
+    assert state["title"] == "docs: tidy" and state["description"] == "Moves pages.<U+200B>"
+    assert state["summary"] == f"201 files changed, {sum(range(200)) + 500} lines added, 0 lines removed"
+    assert state["directories"][0].startswith("docs: 200 files")
+    assert state["files"][0] == "added +500 -0 tools/lib/git.ts"
+    assert len(state["files"]) == MAX_PR_FILES + 1 and state["files"][-1] == "(and 51 smaller files)"
+
+
+def test_pr_state_truncates_long_descriptions():
+    from lisa.checks import MAX_PR_DESCRIPTION_CHARS, pr_state
+
+    state = pr_state("t", "x" * (MAX_PR_DESCRIPTION_CHARS + 50), [])
+    assert state["description"].endswith("(truncated)")
+    assert state["summary"] == "0 files changed, 0 lines added, 0 lines removed"

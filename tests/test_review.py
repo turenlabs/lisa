@@ -511,3 +511,100 @@ fail_at = 1.5
     body = summary["payload"]["body"]
     assert "| license | **1 found** |" in body and "| tests | **1 found** |" in body
     assert "**gpl** (80%)" in body and "**Untested** (score 1.9 of 2)" in body
+
+
+# --- PR-scope questions and duplication ----------------------------------------------------------------
+
+
+def test_pr_scope_questions_are_asked_once_about_the_whole_pull_request(apis, make_env):
+    apis.contents[(".lisa.toml", "base1")] = b"""
+[[questions]]
+id = "scope-creep"
+scope = "pr"
+question = "Does this pull request mix unrelated changes?"
+title = "Mixed changes"
+fix = "Split it into one pull request per purpose."
+"""
+
+    def answer_for(payload):
+        return {"custom_scope-creep": {"noul": 0.9}} if "custom_scope-creep" in payload["questions"] else {}
+
+    apis.answer_for = answer_for
+    assert run(make_env(event=pr_event(title="docs: fix typos", body="Typos only.")), lambda _: None) == 1
+
+    [pr_request] = [r for r in apis.typesafe_requests() if "custom_scope-creep" in r["payload"]["questions"]]
+    state = pr_request["payload"]["state"]
+    assert state["title"] == "docs: fix typos" and state["description"] == "Typos only."
+    assert "added +2 -0 src/db.py" not in state["files"]  # files are listed as GitHub reports them
+    assert any("src/db.py" in line for line in state["files"])
+    chunk_requests = [r for r in apis.typesafe_requests() if "file" in r["payload"]["state"]]
+    assert all("custom_scope-creep" not in r["payload"]["questions"] for r in chunk_requests)
+
+    [summary] = apis.find("POST", "/issues/7/comments")
+    body = summary["payload"]["body"]
+    assert "| Mixed changes | **1 found** |" in body
+    assert "- Pull request: **Mixed changes** (90%)." in body
+
+
+def test_duplicated_files_are_compared_and_flagged_on_the_second_file(apis, make_env):
+    helper = "\n".join(
+        [
+            "+export function git(cwd: string, ...args: string[]) {",
+            '+  const result = Bun.spawnSync(["git", "-C", cwd, ...args])',
+            "+  return result.exitCode === 0 ? result.stdout.toString().trim() : undefined",
+            "+}",
+        ]
+    )
+    apis.files = [
+        {
+            "filename": f"skills/{name}/lib/git.ts",
+            "status": "added",
+            "changes": 4,
+            "patch": f"@@ -0,0 +1,4 @@\n{helper}",
+        }
+        for name in ("context", "docs")
+    ]
+
+    def answer_for(payload):
+        return {"duplication": {"noul": 0.92}} if "duplication" in payload["questions"] else {}
+
+    apis.answer_for = answer_for
+    assert run(make_env(event=pr_event(changed_files=2)), lambda _: None) == 1
+
+    [pair] = [r for r in apis.typesafe_requests() if "duplication" in r["payload"]["questions"]]
+    assert (pair["payload"]["state"]["file_a"], pair["payload"]["state"]["file_b"]) == (
+        "skills/context/lib/git.ts",
+        "skills/docs/lib/git.ts",
+    )
+    chunk_requests = [r for r in apis.typesafe_requests() if "file" in r["payload"]["state"]]
+    assert all("duplication" not in r["payload"]["questions"] for r in chunk_requests)
+
+    [review] = apis.find("POST", "/pulls/7/reviews")
+    [inline] = review["payload"]["comments"]
+    assert (inline["path"], inline["line"]) == ("skills/docs/lib/git.ts", 1)
+    assert "**Duplicated code: Same logic as another file** (92% likely)" in inline["body"]
+    assert "The same logic is in `skills/context/lib/git.ts`." in inline["body"]
+
+
+def test_the_duplication_check_can_be_turned_off(apis, make_env):
+    apis.contents[(".lisa.toml", "base1")] = b"[checks]\nduplication = false\n"
+    helper = "\n".join(f"+shared_line_number_{i} = compute({i})" for i in range(5))
+    apis.files = [
+        {"filename": f"{d}/util.py", "status": "added", "changes": 5, "patch": f"@@ -0,0 +1,5 @@\n{helper}"}
+        for d in ("a", "b")
+    ]
+    apis.answers = {}
+    assert run(make_env(event=pr_event(changed_files=2)), lambda _: None) == 0
+    assert not [r for r in apis.typesafe_requests() if "duplication" in r["payload"]["questions"]]
+
+
+def test_a_failed_comparison_fails_closed(apis, make_env):
+    helper = "\n".join(f"+shared_line_number_{i} = compute({i})" for i in range(5))
+    apis.files = [
+        {"filename": f"{d}/util.py", "status": "added", "changes": 5, "patch": f"@@ -0,0 +1,5 @@\n{helper}"}
+        for d in ("a", "b")
+    ]
+    apis.answer_for = lambda payload: {"duplication": None} if "duplication" in payload["questions"] else {}
+    assert run(make_env(event=pr_event(changed_files=2)), lambda _: None) == 1
+    [summary] = apis.find("POST", "/issues/7/comments")
+    assert "`a/util.py and b/util.py`" in summary["payload"]["body"]

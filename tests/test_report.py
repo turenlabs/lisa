@@ -119,3 +119,24 @@ def test_score_findings_show_the_score_instead_of_a_probability():
     assert "**Bad** (score 0.9 of 1)." in render_summary(
         "m", review([finding], Coverage(1, 1, 1), checks=DEFAULT_CHECKS.extended([check]))
     )
+
+
+def test_duplication_findings_name_the_other_file_safely():
+    check = DEFAULT_CHECKS["duplication"]
+    evil = "a/git.ts` [approve](https://evil)"
+    finding = Finding(check, check.kinds["other"], "b/git.ts", 3, 0.9, "export function git()", related=evil)
+    inline = render_inline(finding, "jev")
+    assert "The same logic is in `` a/git.ts` [approve](https://evil) ``." in inline
+    summary = render_summary("m", review([finding], Coverage(2, 2, 2)))
+    assert "Also in `` a/git.ts` [approve](https://evil) ``." in summary
+    assert marker(finding) != marker(replace(finding, related="c/git.ts"))
+
+
+def test_pull_request_findings_are_labeled_as_such():
+    from lisa.checks import custom_check
+    from lisa.models import CustomQuestion
+
+    check = custom_check(CustomQuestion(id="scope", question="Q?", title="Scope", scope="pr"))
+    finding = Finding(check, check.kinds["other"], "", 0, 0.8)
+    body = render_summary("m", review([finding], Coverage(1, 1, 1), checks=DEFAULT_CHECKS.extended([check])))
+    assert "- Pull request: **Scope** (80%)." in body
