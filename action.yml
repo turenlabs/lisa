@@ -1,0 +1,46 @@
+name: Lisa
+description: Review pull requests for unneeded complexity, security issues, and leaked secrets using TypeSafe.
+author: Lisa
+branding:
+  icon: shield
+  color: purple
+
+inputs:
+  api-key:
+    description: TypeSafe API key (store it as a repository secret).
+    required: true
+  github-token:
+    description: Token used to read the PR diff and post the review comment.
+    required: false
+    default: ${{ github.token }}
+  model:
+    description: TypeSafe model to use.
+    required: false
+    default: jev-latest
+  threshold:
+    description: Probability (0-1) at which Jev's answer counts as "yes" and fails the PR.
+    required: false
+    default: "0.5"
+  comment:
+    description: Post (and keep updating) a summary comment on the pull request.
+    required: false
+    default: "true"
+
+outputs:
+  findings:
+    description: Total number of findings.
+    value: ${{ steps.lisa.outputs.findings }}
+
+runs:
+  using: composite
+  steps:
+    - id: lisa
+      shell: bash
+      run: python3 -m lisa
+      env:
+        PYTHONPATH: ${{ github.action_path }}
+        INPUT_API_KEY: ${{ inputs.api-key }}
+        INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
+        INPUT_MODEL: ${{ inputs.model }}
+        INPUT_THRESHOLD: ${{ inputs.threshold }}
+        INPUT_COMMENT: ${{ inputs.comment }}
