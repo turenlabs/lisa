@@ -1,7 +1,7 @@
 """Turns checks into TypeSafe questions, and TypeSafe answers into findings."""
 
 from lisa.default_checks import DEFAULT_CHECKS
-from lisa.errors import ConfigError
+from lisa.errors import ApiError, ConfigError
 from lisa.models import Check, CheckCatalog, Chunk, CustomQuestion, Finding, Kind, RepoConfig
 
 DIFF_FORMAT = (
@@ -17,7 +17,7 @@ DESCRIPTION = Chunk(file="", diff="", added=(), start_line=0)
 
 
 def custom_check(question: CustomQuestion) -> Check:
-    """A check for a question from .lisa.yml."""
+    """A check for a question from .lisa.toml."""
     criteria = {"true": question.yes_if, "false": question.no_if}
     return Check(
         key=f"custom_{question.id}",
@@ -35,7 +35,7 @@ def build_checks(repo_config: RepoConfig) -> CheckCatalog:
     unknown = repo_config.disabled - set(DEFAULT_CHECKS.keys())
     if unknown:
         raise ConfigError(
-            f".lisa.yml disables unknown check(s) {', '.join(sorted(unknown))}; "
+            f".lisa.toml disables unknown check(s) {', '.join(sorted(unknown))}; "
             f"built-in checks are {', '.join(DEFAULT_CHECKS.keys())}."
         )
     return DEFAULT_CHECKS.without(repo_config.disabled).extended(custom_check(q) for q in repo_config.questions)
@@ -65,14 +65,23 @@ def questions(check: Check, line_options: dict[str, str]) -> dict[str, dict]:
 def finding(check: Check, chunk: Chunk, answers: dict, threshold: float) -> Finding | None:
     """A finding if Jev answered yes (probability at or above the threshold), otherwise None.
     Malformed follow-up answers fall back to the "other" kind and the chunk's first line."""
-    probability = _answer(answers, check.key).get("noul")
-    if not isinstance(probability, (int, float)) or probability < (check.threshold or threshold):
+    probability = _probability(answers, check.key)
+    if probability < (check.threshold or threshold):
         return None
     kind = check.kinds.get(_answer(answers, f"{check.key}_kind").get("choice"), check.kinds["other"])
     line = _answer(answers, f"{check.key}_line").get("choice")
     number = int(line) if isinstance(line, str) and line.isdigit() else chunk.start_line
     text = next((added.text for added in chunk.added if added.number == number), "")
     return Finding(check, kind, chunk.file, number, float(probability), text)
+
+
+def _probability(answers: dict, key: str) -> float:
+    """The yes/no answer. A missing or invalid one is an error, not a "no": treating it as "no"
+    would pass code nobody reviewed."""
+    probability = _answer(answers, key).get("noul")
+    if isinstance(probability, bool) or not isinstance(probability, (int, float)) or not 0 <= probability <= 1:
+        raise ApiError(f"TypeSafe returned no valid answer for {key!r}.")
+    return float(probability)
 
 
 def _answer(answers: dict, key: str) -> dict:

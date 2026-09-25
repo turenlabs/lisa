@@ -61,23 +61,26 @@ def test_missing_event_file_is_a_config_error(tmp_path):
 
 
 FULL = """
-threshold: 0.7
-ignore:
-  - docs/*
-checks:
-  complexity: false
-  secret: true
-questions:
-  - id: debug-prints
-    question: Does this diff add debugging print statements?
-    title: Debug output
-    yes_if: Adds print or console.log calls used for debugging.
-    no_if: Uses the project's logger.
-    why: Debug output leaks into production logs.
-    fix: Remove it or use the logger.
-    threshold: 0.9
-  - id: todo
-    question: Does this diff add a TODO without a ticket link?
+threshold = 0.7
+ignore = ["docs/*"]
+
+[checks]
+complexity = false
+secret = true
+
+[[questions]]
+id = "debug-prints"
+question = "Does this diff add debugging print statements?"
+title = "Debug output"
+yes_if = "Adds print or console.log calls used for debugging."
+no_if = "Uses the project's logger."
+why = "Debug output leaks into production logs."
+fix = "Remove it or use the logger."
+threshold = 0.9
+
+[[questions]]
+id = "todo"
+question = "Does this diff add a TODO without a ticket link?"
 """
 
 
@@ -108,20 +111,19 @@ def test_empty_repo_config_uses_defaults(text):
 @pytest.mark.parametrize(
     "text, message",
     [
-        ("threshold: [", "not valid YAML"),
-        ("- a\n- b", "must be a mapping"),
-        ("thresold: 0.5", "unknown setting.*thresold"),
-        ("threshold: 2", "threshold"),
-        ("threshold: true", "threshold"),
-        ("ignore: docs/*", "`ignore`.*list"),
-        ("checks:\n  complexity: off-ish", "`checks`.*true or false"),
-        ("questions: nope", "`questions`.*list"),
-        ("questions:\n  - just a string", r"questions\[0\].*mapping"),
-        ("questions:\n  - question: Missing id?", r"questions\[0\]\.id"),
-        ("questions:\n  - id: x", r"questions\[0\]\.question"),
-        ("questions:\n  - id: Bad Id\n    question: Q?", "lowercase"),
-        ("questions:\n  - id: x\n    question: Q?\n    yes: 1", "unknown setting.*yes"),
-        ("questions:\n  - id: x\n    question: Q?\n  - id: x\n    question: R?", "duplicate question id.*x"),
+        ("threshold = [", "not valid TOML"),
+        ("thresold = 0.5", "unknown setting.*thresold"),
+        ("threshold = 2", "threshold"),
+        ("threshold = true", "threshold"),
+        ('ignore = "docs/*"', "`ignore`.*list"),
+        ('[checks]\ncomplexity = "off"', "`checks`.*true or false"),
+        ('questions = "nope"', "`questions`.*array of tables"),
+        ('questions = ["just a string"]', r"questions\[0\].*table"),
+        ('[[questions]]\nquestion = "Missing id?"', r"questions\[0\]\.id"),
+        ('[[questions]]\nid = "x"', r"questions\[0\]\.question"),
+        ('[[questions]]\nid = "Bad Id"\nquestion = "Q?"', "lowercase"),
+        ('[[questions]]\nid = "x"\nquestion = "Q?"\nyes = 1', "unknown setting.*yes"),
+        ('[[questions]]\nid = "x"\nquestion = "Q?"\n[[questions]]\nid = "x"\nquestion = "R?"', "duplicate.*x"),
     ],
 )
 def test_invalid_repo_config_is_explained(text, message):
@@ -130,6 +132,21 @@ def test_invalid_repo_config_is_explained(text, message):
 
 
 def test_repo_config_limits_the_number_of_questions():
-    questions = "\n".join(f"  - id: q{i}\n    question: Q{i}?" for i in range(21))
+    questions = "".join(f'[[questions]]\nid = "q{i}"\nquestion = "Q{i}?"\n' for i in range(21))
     with pytest.raises(ConfigError, match="at most 20"):
-        parse_repo_config(f"questions:\n{questions}")
+        parse_repo_config(questions)
+
+
+def test_repo_config_limits_its_size():
+    with pytest.raises(ConfigError, match="larger than"):
+        parse_repo_config("# " + "x" * 70_000)
+
+
+def test_the_readme_example_is_a_valid_config():
+    import re
+    from pathlib import Path
+
+    readme = (Path(__file__).parent.parent / "README.md").read_text()
+    config = parse_repo_config(re.search(r"```toml\n(.*?)```", readme, re.S).group(1))
+    assert config.disabled == frozenset({"complexity"})
+    assert [q.id for q in config.questions] == ["debug-prints"]

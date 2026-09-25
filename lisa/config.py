@@ -1,14 +1,16 @@
-"""Reads and validates the action's inputs, the workflow event, and .lisa.yml."""
+"""Reads and validates the action's inputs, the workflow event, and .lisa.toml."""
 
 import json
 import re
+import tomllib
 from collections.abc import Mapping
 from typing import Any
 
 from lisa.errors import ConfigError
 from lisa.models import Config, CustomQuestion, PullRequest, RepoConfig
 
-REPO_CONFIG_PATH = ".lisa.yml"
+REPO_CONFIG_PATH = ".lisa.toml"
+MAX_REPO_CONFIG_BYTES = 64_000
 MAX_CUSTOM_QUESTIONS = 20
 QUESTION_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 REPO_CONFIG_FIELDS = frozenset({"threshold", "ignore", "checks", "questions"})
@@ -68,20 +70,14 @@ def load_pull_request(event_path: str) -> PullRequest | None:
 
 
 def parse_repo_config(text: str) -> RepoConfig:
-    """Parses .lisa.yml, raising ConfigError with the exact problem if anything is invalid."""
+    """Parses .lisa.toml, raising ConfigError with the exact problem if anything is invalid."""
+    if len(text) > MAX_REPO_CONFIG_BYTES:
+        raise ConfigError(f"{REPO_CONFIG_PATH} is larger than {MAX_REPO_CONFIG_BYTES:,} bytes.")
     try:
-        import yaml
-    except ImportError as error:
-        raise ConfigError(f"Reading {REPO_CONFIG_PATH} needs PyYAML, which could not be imported.") from error
-    try:
-        data = yaml.safe_load(text)
-    except yaml.YAMLError as error:
-        raise ConfigError(f"{REPO_CONFIG_PATH} is not valid YAML: {error}") from error
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as error:
+        raise ConfigError(f"{REPO_CONFIG_PATH} is not valid TOML: {error}") from error
 
-    if data is None:
-        return RepoConfig()
-    if not isinstance(data, dict):
-        raise ConfigError(f"{REPO_CONFIG_PATH} must be a mapping of settings.")
     _reject_unknown(data, REPO_CONFIG_FIELDS, REPO_CONFIG_PATH)
 
     ignore = data.get("ignore") or []
@@ -90,11 +86,11 @@ def parse_repo_config(text: str) -> RepoConfig:
 
     checks = data.get("checks") or {}
     if not isinstance(checks, dict) or not all(isinstance(enabled, bool) for enabled in checks.values()):
-        raise ConfigError(f"`checks` in {REPO_CONFIG_PATH} must map check names to true or false.")
+        raise ConfigError(f"`checks` in {REPO_CONFIG_PATH} must set built-in check names to true or false.")
 
     raw_questions = data.get("questions") or []
     if not isinstance(raw_questions, list):
-        raise ConfigError(f"`questions` in {REPO_CONFIG_PATH} must be a list.")
+        raise ConfigError(f"`questions` in {REPO_CONFIG_PATH} must be an array of tables ([[questions]]).")
     if len(raw_questions) > MAX_CUSTOM_QUESTIONS:
         raise ConfigError(f"{REPO_CONFIG_PATH} can define at most {MAX_CUSTOM_QUESTIONS} questions.")
     questions = tuple(_parse_question(item, f"questions[{i}]") for i, item in enumerate(raw_questions))
@@ -113,7 +109,7 @@ def parse_repo_config(text: str) -> RepoConfig:
 
 def _parse_question(data: Any, where: str) -> CustomQuestion:
     if not isinstance(data, dict):
-        raise ConfigError(f"{where} in {REPO_CONFIG_PATH} must be a mapping with `id` and `question`.")
+        raise ConfigError(f"{where} in {REPO_CONFIG_PATH} must be a table with `id` and `question`.")
     _reject_unknown(data, QUESTION_FIELDS, where)
 
     def text(name: str, required: bool = False) -> str:

@@ -19,9 +19,22 @@ def test_parse_patch_tracks_new_file_line_numbers():
     assert [(line.kind, line.number) for line in second] == [(" ", 41), ("-", None), ("+", 42)]
 
 
-def test_parse_patch_truncates_enormous_lines():
-    [[line]] = parse_patch("@@ -0,0 +1 @@\n+" + "x" * 50_000)
-    assert len(line.text) == MAX_LINE_CHARS
+def test_long_lines_are_split_into_segments_not_cut_off():
+    """Code placed after a long run of characters must still reach Jev."""
+    [segments] = parse_patch("@@ -0,0 +1 @@\n+" + "x" * 2_500 + "; exec(payload)")
+    assert [len(s.text) for s in segments] == [MAX_LINE_CHARS, MAX_LINE_CHARS, 515]
+    assert {s.number for s in segments} == {1}
+    assert segments[-1].text.endswith("; exec(payload)")
+
+
+def test_whitespace_padding_is_collapsed_so_hidden_code_is_visible():
+    [[line]] = parse_patch("@@ -0,0 +1 @@\n+ok()" + " " * 5_000 + "; exec(payload)")
+    assert line.text == "ok()<5000 spaces>; exec(payload)"
+
+
+def test_line_numbers_continue_after_a_split_line():
+    lines = parse_patch("@@ -0,0 +1,2 @@\n+" + "x" * 1_500 + "\n+next")[0]
+    assert [(line.number, line.text[:4]) for line in lines] == [(1, "xxxx"), (1, "xxxx"), (2, "next")]
 
 
 def test_chunk_file_keeps_small_hunks_together():

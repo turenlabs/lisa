@@ -119,6 +119,11 @@ class Finding:
     probability: float
     text: str = ""  # the flagged line, used to recognize the same finding across pushes
 
+    @property
+    def located(self) -> bool:
+        """Whether the finding points at an added line, so it can get an inline comment."""
+        return bool(self.file and self.text)
+
 
 @dataclass
 class Coverage:
@@ -130,10 +135,29 @@ class Coverage:
     files_unlisted: int = 0  # beyond what GitHub's files API returns
     too_large: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)  # files or "path:line" chunks that could not be reviewed
+    skipped: list[str] = field(default_factory=list)  # lockfiles, binaries, vendored, and ignored files
 
     @property
     def complete(self) -> bool:
+        """Whether every file that should have been reviewed was. Deliberately skipped files do not count."""
         return not (self.files_unlisted or self.too_large or self.failed)
+
+
+@dataclass(frozen=True)
+class ReviewResult:
+    """Everything a report needs about one review."""
+
+    checks: CheckCatalog
+    findings: list[Finding]
+    coverage: Coverage
+    model: str  # the exact model version that answered
+    commit: str  # the head commit that was reviewed
+    blob_url: str  # base URL for links to files at that commit
+    settings: str  # where the settings came from, for the audit trail
+
+    @property
+    def passed(self) -> bool:
+        return not self.findings and self.coverage.complete
 
 
 # --- Configuration -------------------------------------------------------------------------------
@@ -167,21 +191,21 @@ class PullRequest:
 
 @dataclass(frozen=True)
 class CustomQuestion:
-    """A repository's own yes/no question from .lisa.yml, asked about every chunk of the diff."""
+    """A repository's own yes/no question from .lisa.toml, asked about every chunk of the diff."""
 
     id: str
     question: str
     title: str
     yes_if: str = ""
     no_if: str = ""
-    why: str = "This change matches a rule the repository defines in .lisa.yml."
+    why: str = "This change matches a rule the repository defines in .lisa.toml."
     fix: str = "Change the code so the answer to this question is no, or discuss the rule with the maintainers."
     threshold: float | None = None
 
 
 @dataclass(frozen=True)
 class RepoConfig:
-    """Per-repository settings from .lisa.yml."""
+    """Per-repository settings from .lisa.toml."""
 
     threshold: float | None = None
     ignore: tuple[str, ...] = ()

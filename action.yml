@@ -18,7 +18,7 @@ inputs:
     required: false
     default: jev-latest
   threshold:
-    description: Probability (0-1) at which Jev's answer counts as "yes" and fails the PR. Defaults to the threshold in .lisa.yml, or 0.5.
+    description: Probability (0-1) at which Jev's answer counts as "yes" and fails the PR. Defaults to the threshold in .lisa.toml, or 0.5.
     required: false
     default: ""
 
@@ -30,21 +30,16 @@ outputs:
 runs:
   using: composite
   steps:
-    # PyYAML reads .lisa.yml. Use the runner's copy if it has one; otherwise install a pinned
-    # wheel into a temporary directory, leaving the runner's Python untouched.
-    - shell: bash
-      run: |
-        if ! python3 -c "import yaml" 2>/dev/null; then
-          python3 -m pip install --quiet --disable-pip-version-check --only-binary=:all: \
-            --target "$RUNNER_TEMP/lisa-python" "PyYAML==6.0.3"
-        fi
-      env:
-        PIP_BREAK_SYSTEM_PACKAGES: "1"
+    # Lisa uses only the Python standard library. It runs from the action's own directory with
+    # PYTHONSAFEPATH and without user site-packages, so nothing in the workspace (which may hold
+    # pull request code) can shadow its modules.
     - id: lisa
       shell: bash
-      run: python3 -m lisa
+      working-directory: ${{ github.action_path }}
+      run: python3 -s -m lisa
       env:
-        PYTHONPATH: ${{ github.action_path }}:${{ runner.temp }}/lisa-python
+        PYTHONPATH: ${{ github.action_path }}
+        PYTHONSAFEPATH: "1"
         INPUT_API_KEY: ${{ inputs.api-key }}
         INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
         INPUT_MODEL: ${{ inputs.model }}

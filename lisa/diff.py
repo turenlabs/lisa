@@ -10,12 +10,15 @@ from lisa.models import Chunk, Line
 MAX_CHUNK_CHARS = 12_000
 # Added lines are offered as options of a Choice question, which allows at most 255.
 MAX_CHUNK_ADDED = 200
-# Minified or generated lines can be enormous; the start is enough to judge them.
+# Longer lines are split into segments of this size. Nothing is dropped, so code cannot hide at
+# the end of a long line.
 MAX_LINE_CHARS = 1_000
 
 HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 # Characters people cannot see: zero-width, bidirectional overrides, and Unicode tags (used to
 # smuggle hidden text). They are made visible so hidden instructions can be judged.
+# Long runs of spaces or tabs are collapsed so padding cannot push code out of view.
+LONG_WHITESPACE = re.compile(r"[ \t]{64,}")
 INVISIBLE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\U000e0000-\U000e007f]")
 
 SKIPPED = [
@@ -42,6 +45,13 @@ def reveal_invisible(text: str) -> str:
     return INVISIBLE.sub(lambda match: f"<U+{ord(match[0]):04X}>", text)
 
 
+def _segments(text: str) -> list[str]:
+    """The line as Jev should see it: hidden characters and padding made visible, split into
+    segments of at most MAX_LINE_CHARS."""
+    text = LONG_WHITESPACE.sub(lambda match: f"<{len(match[0])} spaces>", reveal_invisible(text))
+    return [text[i : i + MAX_LINE_CHARS] for i in range(0, len(text), MAX_LINE_CHARS)] or [""]
+
+
 def unified_patch(old: str, new: str) -> str:
     """Builds a GitHub-style patch (hunks only, no file headers) from two file versions."""
     lines = difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=3)
@@ -60,11 +70,10 @@ def parse_patch(patch: str) -> list[list[Line]]:
             hunk = []
             hunks.append(hunk)
         elif hunk is not None and raw and not raw.startswith("\\"):
-            text = reveal_invisible(raw[1:])[:MAX_LINE_CHARS]
-            if raw[0] == "-":
-                hunk.append(Line("-", text, None))
-            else:
-                hunk.append(Line("+" if raw[0] == "+" else " ", text, number))
+            kind = raw[0] if raw[0] in "+-" else " "
+            line_number = None if kind == "-" else number
+            hunk += [Line(kind, segment, line_number) for segment in _segments(raw[1:])]
+            if kind != "-":
                 number += 1
     return hunks
 
