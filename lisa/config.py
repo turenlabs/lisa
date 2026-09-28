@@ -8,14 +8,14 @@ from dataclasses import replace
 from typing import Any
 
 from lisa.errors import ConfigError
-from lisa.models import QUESTION_TYPES, SCOPES, Config, CustomQuestion, PullRequest, RepoConfig
+from lisa.models import FILE_KINDS, QUESTION_TYPES, SCOPES, Config, CustomQuestion, PullRequest, RepoConfig
 
 REPO_CONFIG_PATH = ".lisa.toml"
 MAX_REPO_CONFIG_BYTES = 64_000
 MAX_CUSTOM_QUESTIONS = 20
 QUESTION_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
-REPO_CONFIG_FIELDS = frozenset({"threshold", "ignore", "checks", "questions"})
-QUESTION_FIELDS = frozenset({"id", "type", "scope", "question", "title", "why", "fix"})
+REPO_CONFIG_FIELDS = frozenset({"threshold", "ignore", "checks", "questions", "author_can_dismiss"})
+QUESTION_FIELDS = frozenset({"id", "type", "scope", "files", "question", "title", "why", "fix"})
 # Settings that only make sense for one question type.
 TYPE_FIELDS = {
     "noul": frozenset({"yes_if", "no_if", "threshold"}),
@@ -52,6 +52,7 @@ def load_config(env: Mapping[str, str]) -> Config:
         server_url=get("GITHUB_SERVER_URL", Config.server_url),
         summary_path=get("GITHUB_STEP_SUMMARY") or None,
         output_path=get("GITHUB_OUTPUT") or None,
+        graphql_url=get("GITHUB_GRAPHQL_URL", Config.graphql_url),
     )
 
 
@@ -74,6 +75,7 @@ def load_pull_request(event_path: str) -> PullRequest | None:
             changed_files=int(pr.get("changed_files") or 0),
             title=pr.get("title") or "",
             body=pr.get("body") or "",
+            author=(pr.get("user") or {}).get("login") or "",
         )
     except (KeyError, TypeError, ValueError) as error:
         raise ConfigError(f"The pull request in the workflow event is missing {error}.") from error
@@ -109,7 +111,12 @@ def parse_repo_config(text: str) -> RepoConfig:
     if duplicates:
         raise ConfigError(f"{REPO_CONFIG_PATH} has duplicate question id(s): {', '.join(duplicates)}.")
 
+    author_can_dismiss = data.get("author_can_dismiss", False)
+    if not isinstance(author_can_dismiss, bool):
+        raise ConfigError(f"`author_can_dismiss` in {REPO_CONFIG_PATH} must be true or false.")
+
     return RepoConfig(
+        author_can_dismiss=author_can_dismiss,
         threshold=_threshold(data["threshold"], f"`threshold` in {REPO_CONFIG_PATH}") if "threshold" in data else None,
         ignore=tuple(ignore),
         disabled=frozenset(str(name) for name, enabled in checks.items() if not enabled),
@@ -127,6 +134,11 @@ def _parse_question(data: Any, where: str) -> CustomQuestion:
     scope = data.get("scope", "diff")
     if scope not in SCOPES:
         raise ConfigError(f"{where}.scope must be one of {', '.join(SCOPES)}, got {scope!r}.")
+    files = data.get("files", list(FILE_KINDS))
+    if not isinstance(files, list) or not files or not set(files) <= set(FILE_KINDS):
+        raise ConfigError(f"{where}.files must list file kinds from: {', '.join(FILE_KINDS)}.")
+    if "files" in data and scope == "pr":
+        raise ConfigError(f'{where}.files applies only to scope = "diff" questions.')
 
     def text(name: str, required: bool = False) -> str:
         value = data.get(name)
@@ -147,6 +159,7 @@ def _parse_question(data: Any, where: str) -> CustomQuestion:
         title=text("title") or question_id,
         type=question_type,
         scope=scope,
+        files=tuple(kind for kind in FILE_KINDS if kind in files),
         why=text("why") or CustomQuestion.why,
         fix=text("fix") or CustomQuestion.fix,
     )

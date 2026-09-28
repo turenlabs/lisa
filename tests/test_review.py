@@ -6,6 +6,7 @@ import pytest
 from lisa import api
 from lisa.models import Response
 from lisa.review import CHECKS_PER_REQUEST, MAX_FILE_BYTES, MAX_INLINE_COMMENTS, MAX_REQUESTS, command, run
+from tests.typesafe_schema import request_problems
 
 SQLI = 'db.execute("SELECT * FROM t WHERE id=" + id)'
 BOT = {"type": "Bot", "login": "github-actions[bot]"}
@@ -39,6 +40,10 @@ class FakeApis:
         self.review_status = 200
         self.issue_comments = [{"id": 99, "user": BOT, "body": "unrelated"}]
         self.review_comments = []
+        self.rejected = []  # problems with requests the real TypeSafe API would reject
+        self.resolved = []  # (first comment body, resolver login) of resolved bot review threads
+        self.permissions = {}  # login -> repository permission
+        self.graphql_status = 200
 
     def send(self, method, url, headers, payload=None, limit=api.MAX_RESPONSE_BYTES):
         self.calls.append({"method": method, "url": url, "headers": headers, "payload": payload, "limit": limit})
@@ -47,10 +52,31 @@ class FakeApis:
         if parts.netloc == "api.typesafe.ai":
             if self.typesafe_status != 200:
                 return self._json({"detail": {"error_type": "boom"}}, self.typesafe_status)
+            problems = request_problems(payload)
+            if problems:
+                self.rejected.append(problems)
+                return self._json({"detail": {"error_type": "invalid_request_error"}}, 400)
             gates = [key for key in payload["questions"] if not key.endswith(("_kind", "_line"))]
             answers = {key: {"type": "noul", "noul": 0.0} for key in gates}
             answers.update(self.answer_for(payload) if self.answer_for else self.answers)
             return self._json({"model": "jev-1.13.0", "answers": answers})
+        if path == "/graphql":
+            if self.graphql_status != 200:
+                return self._json({"message": "Server Error"}, self.graphql_status)
+            nodes = [
+                {
+                    "isResolved": True,
+                    "resolvedBy": {"login": login},
+                    "comments": {"nodes": [{"body": body, "author": {"__typename": "Bot"}}]},
+                }
+                for body, login in self.resolved
+            ]
+            page = {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}
+            return self._json({"data": {"repository": {"pullRequest": {"reviewThreads": page}}}})
+        if "/collaborators/" in path and path.endswith("/permission"):
+            login = path.split("/collaborators/")[1].split("/")[0]
+            permission = self.permissions.get(login)
+            return self._json({"permission": permission}) if permission else self._json({"message": "Not Found"}, 404)
         if path.endswith("/pulls/7/files"):
             page = int(query["page"][0])
             return self._json(self.files[(page - 1) * 100 : page * 100])
@@ -87,7 +113,9 @@ def apis(monkeypatch):
     fake = FakeApis()
     monkeypatch.setattr(api, "send", fake.send)
     monkeypatch.setattr(api.time, "sleep", lambda _: None)
-    return fake
+    yield fake
+    # Every test also checks that Lisa sent nothing the real TypeSafe API would reject.
+    assert fake.rejected == [], f"Lisa sent invalid TypeSafe requests: {fake.rejected}"
 
 
 @pytest.fixture
@@ -608,3 +636,153 @@ def test_a_failed_comparison_fails_closed(apis, make_env):
     assert run(make_env(event=pr_event(changed_files=2)), lambda _: None) == 1
     [summary] = apis.find("POST", "/issues/7/comments")
     assert "`a/util.py and b/util.py`" in summary["payload"]["body"]
+
+
+def test_large_duplicate_pairs_send_valid_requests(apis, make_env):
+    """turenos#172: a 485-line file in a candidate pair made Lisa send a line question with no
+    instructions and 485 options; TypeSafe answered 400 and the PR failed as not reviewed."""
+    shared = "\n".join(f"+export const setting_number_{i} = readSetting('key_{i}')" for i in range(485))
+    apis.files = [
+        {"filename": f"{d}/persistent.ts", "status": "added", "changes": 485, "patch": f"@@ -0,0 +1,485 @@\n{shared}"}
+        for d in ("desktop/ssh", "forge/cli")
+    ]
+    apis.answers = {}
+    assert run(make_env(event=pr_event(changed_files=2)), lambda _: None) == 0
+    [pair] = [r for r in apis.typesafe_requests() if "duplication" in r["payload"]["questions"]]
+    assert set(pair["payload"]["questions"]) == {"duplication"}
+
+
+# --- File kinds ----------------------------------------------------------------------------------
+
+
+def one_file(path: str, *lines: str) -> list[dict]:
+    body = "\n".join(f"+{line}" for line in lines)
+    return [
+        {"filename": path, "status": "added", "changes": len(lines), "patch": f"@@ -0,0 +1,{len(lines)} @@\n{body}"}
+    ]
+
+
+def asked(apis, path: str) -> set[str]:
+    return {key for r in apis.typesafe_requests(path) for key in r["payload"]["questions"]}
+
+
+def test_docs_are_checked_for_secrets_and_prompt_injection_only(apis, make_env):
+    """turenos#125: a docs line describing permission behavior was flagged as weakened access control."""
+    apis.files = one_file(
+        "services/catalog/AGENTS.md", "Write tools are opt-in.", "`ask` resolves to `allow` by default."
+    )
+    apis.answers = {}
+    assert run(make_env(), lambda _: None) == 0
+    gates = {key for key in asked(apis, "services/catalog/AGENTS.md") if not key.endswith(("_kind", "_line"))}
+    assert gates == {"secret", "prompt_injection"}
+
+
+def test_generated_code_skips_quality_checks_but_not_security(apis, make_env):
+    """turenos#93: generated SDK files were flagged for complexity and duplication."""
+    apis.files = one_file("packages/sdk/js/src/gen/types.gen.ts", "export type A = { id: string }", "export type B = A")
+    apis.answers = {}
+    assert run(make_env(), lambda _: None) == 0
+    questions = asked(apis, "packages/sdk/js/src/gen/types.gen.ts")
+    assert {"secret", "security", "prompt_injection"} <= questions
+    assert "complexity" not in questions
+    [summary] = apis.find("POST", "/issues/7/comments")
+    assert (
+        "Reviewed as generated code, without the quality checks: `packages/sdk/js/src/gen/types.gen.ts`"
+        in summary["payload"]["body"]
+    )
+
+
+def test_a_generated_marker_cannot_hide_a_vulnerability(apis, make_env):
+    """Headers and file names come from the PR author, so they never turn off security checks."""
+    apis.files = one_file("src/payload.ts", "// @generated DO NOT EDIT", "eval(request.body)")
+    apis.answers = {"security": {"noul": 0.97}, "security_kind": {"choice": "code_execution"}}
+    assert run(make_env(), lambda _: None) == 1
+    assert "security" in asked(apis, "src/payload.ts")
+
+
+def test_gitattributes_on_the_base_branch_marks_generated_files(apis, make_env):
+    apis.contents[(".gitattributes", "base1")] = b"src/schema/** linguist-generated=true\n"
+    apis.files = one_file("src/schema/models.ts", "export interface Model { id: string }", "export const version = 3")
+    apis.answers = {}
+    assert run(make_env(), lambda _: None) == 0
+    assert "complexity" not in asked(apis, "src/schema/models.ts")
+
+
+def test_generated_files_are_not_compared_for_duplication(apis, make_env):
+    body = [f"export const field_number_{i}: string = 'value_{i}'" for i in range(5)]
+    apis.files = one_file("gen/a/types.gen.ts", *body) + one_file("gen/b/types.gen.ts", *body)
+    apis.answers = {}
+    assert run(make_env(event=pr_event(changed_files=2)), lambda _: None) == 0
+    assert not [r for r in apis.typesafe_requests() if "duplication" in r["payload"]["questions"]]
+
+
+# --- Dismissing findings -----------------------------------------------------------------------------
+
+
+def flag_security(apis, make_env) -> str:
+    """Runs a review that flags src/db.py:3 and returns the inline comment's first line (its marker)."""
+    assert run(make_env(event=pr_event(user={"login": "author"})), lambda _: None) == 1
+    [review] = apis.find("POST", "/pulls/7/reviews")
+    [comment] = review["payload"]["comments"]
+    apis.review_comments = [{"user": BOT, "body": comment["body"]}]
+    apis.calls.clear()
+    return comment["body"].split("\n", 1)[0]
+
+
+def test_a_maintainer_can_dismiss_a_finding_by_resolving_its_comment(apis, make_env, tmp_path):
+    """turenos#172: findings the team reviewed and kept kept the PR red with no way forward."""
+    marker = flag_security(apis, make_env)
+    apis.resolved = [(marker, "reviewer")]
+    apis.permissions = {"reviewer": "write"}
+    logs = []
+    assert run(make_env(event=pr_event(user={"login": "author"})), logs.append) == 0
+    [summary] = apis.find("POST", "/issues/7/comments")
+    body = summary["payload"]["body"]
+    assert "## Lisa review: passed" in body
+    assert "| Security vulnerability | Clear (1 dismissed) |" in body
+    assert "**Injection**, dismissed by `reviewer`." in body
+    assert "findings=0" in (tmp_path / "output").read_text()
+    assert "1 finding(s) dismissed by maintainers." in logs
+
+
+@pytest.mark.parametrize(
+    "resolver, permission, author_can_dismiss",
+    [
+        ("author", "admin", False),  # the PR's own author, not allowed by default
+        ("someone", "read", False),  # no write access
+        ("someone", None, False),  # not a collaborator
+    ],
+)
+def test_dismissals_need_write_access_and_someone_other_than_the_author(
+    apis, make_env, resolver, permission, author_can_dismiss
+):
+    marker = flag_security(apis, make_env)
+    apis.resolved = [(marker, resolver)]
+    apis.permissions = {resolver: permission} if permission else {}
+    assert run(make_env(event=pr_event(user={"login": "author"})), lambda _: None) == 1
+
+
+def test_authors_can_dismiss_their_own_findings_when_the_repo_allows_it(apis, make_env):
+    marker = flag_security(apis, make_env)
+    apis.contents[(".lisa.toml", "base1")] = b"author_can_dismiss = true\n"
+    apis.resolved = [(marker, "author")]
+    apis.permissions = {"author": "write"}
+    assert run(make_env(event=pr_event(user={"login": "author"})), lambda _: None) == 0
+
+
+def test_a_dismissal_ends_when_the_flagged_line_changes(apis, make_env):
+    marker = flag_security(apis, make_env)
+    apis.resolved = [(marker, "reviewer")]
+    apis.permissions = {"reviewer": "write"}
+    apis.files[0]["patch"] = apis.files[0]["patch"].replace("WHERE id=", "WHERE uid=")
+    assert run(make_env(event=pr_event(user={"login": "author"})), lambda _: None) == 1
+
+
+def test_if_dismissals_cannot_be_checked_nothing_is_dismissed(apis, make_env):
+    marker = flag_security(apis, make_env)
+    apis.resolved = [(marker, "reviewer")]
+    apis.permissions = {"reviewer": "write"}
+    apis.graphql_status = 500
+    logs = []
+    assert run(make_env(event=pr_event(user={"login": "author"})), logs.append) == 1
+    assert any(line.startswith("::warning::Could not check for dismissed findings") for line in logs)

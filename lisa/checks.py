@@ -18,6 +18,8 @@ DIFF_FORMAT = (
 )
 # Choice option text is trimmed; the start of a line is enough to identify it.
 MAX_OPTION_CHARS = 200
+# TypeSafe accepts at most this many options in a Choice question.
+MAX_CHOICE_OPTIONS = 255
 DEFAULT_THRESHOLD = 0.5
 # The pull request as a whole, as a chunk, so findings about it flow through the same code.
 PULL_REQUEST = Chunk(file="", diff="", added=(), start_line=0)
@@ -53,6 +55,7 @@ def custom_check(question: CustomQuestion) -> Check:
         levels=question.levels,
         fail_at=question.fail_at,
         scope=question.scope,
+        files=frozenset(question.files),
     )
 
 
@@ -87,7 +90,7 @@ def questions(check: Check, line_options: dict[str, str]) -> dict[str, dict]:
             "instructions": check.kind_instructions,
             "criteria": {name: kind.criteria for name, kind in check.kinds.items()},
         }
-    if len(line_options) > 1:
+    if check.line_instructions and 1 < len(line_options) <= MAX_CHOICE_OPTIONS:
         result[f"{check.key}_line"] = {
             "type": "choice",
             "instructions": check.line_instructions,

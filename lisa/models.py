@@ -43,6 +43,9 @@ QUESTION_TYPES = ("noul", "choice", "score")
 # What a check is asked about: each chunk of the diff, the pull request as a whole, or pairs of
 # files that may duplicate each other (the built-in duplication check only).
 SCOPES = ("diff", "pr")
+# How a changed file is treated. File names and headers come from the pull request author, so a
+# file's kind only ever turns off quality checks, never the security ones (see Check.files).
+FILE_KINDS = ("code", "config", "prose", "generated")
 
 
 @dataclass(frozen=True)
@@ -71,6 +74,7 @@ class Check:
     levels: tuple[str, ...] = ()  # score: level descriptions, from best to worst
     fail_at: float | None = None  # score: the score at or above which the check fails
     scope: str = "diff"  # "diff", "pr", or "pairs"
+    files: frozenset[str] = frozenset(FILE_KINDS)  # the kinds of file a diff-scope check is asked about
 
     def matches(self, term: str) -> bool:
         """Whether the term appears in the check's key, title, question, or any of its kinds."""
@@ -141,6 +145,7 @@ class Finding:
     text: str = ""  # the flagged line, used to recognize the same finding across pushes
     score: float | None = None  # score questions only
     related: str = ""  # another file involved, such as the other copy of duplicated code
+    dismissed_by: str = ""  # login of the maintainer who accepted this finding; it no longer fails the check
 
     @property
     def located(self) -> bool:
@@ -159,6 +164,7 @@ class Coverage:
     too_large: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)  # files or "path:line" chunks that could not be reviewed
     skipped: list[str] = field(default_factory=list)  # lockfiles, binaries, vendored, and ignored files
+    generated: list[str] = field(default_factory=list)  # reviewed without quality checks
 
     @property
     def complete(self) -> bool:
@@ -179,8 +185,13 @@ class ReviewResult:
     settings: str  # where the settings came from, for the audit trail
 
     @property
+    def active(self) -> list[Finding]:
+        """The findings that fail the check: all but those a maintainer dismissed."""
+        return [f for f in self.findings if not f.dismissed_by]
+
+    @property
     def passed(self) -> bool:
-        return not self.findings and self.coverage.complete
+        return not self.active and self.coverage.complete
 
 
 # --- Configuration -------------------------------------------------------------------------------
@@ -200,6 +211,7 @@ class Config:
     server_url: str = "https://github.com"
     summary_path: str | None = None
     output_path: str | None = None
+    graphql_url: str = "https://api.github.com/graphql"
 
 
 @dataclass(frozen=True)
@@ -210,6 +222,7 @@ class PullRequest:
     changed_files: int
     title: str = ""
     body: str = ""
+    author: str = ""
 
 
 @dataclass(frozen=True)
@@ -231,6 +244,7 @@ class CustomQuestion:
     fix: str = "Change the code so this rule no longer applies, or discuss the rule with the maintainers."
     threshold: float | None = None  # noul and choice
     scope: str = "diff"  # "diff": each chunk of the diff; "pr": the pull request as a whole
+    files: tuple[str, ...] = FILE_KINDS  # diff scope: the kinds of file to ask about
 
 
 @dataclass(frozen=True)
@@ -241,6 +255,7 @@ class RepoConfig:
     ignore: tuple[str, ...] = ()
     disabled: frozenset[str] = frozenset()
     questions: tuple[CustomQuestion, ...] = ()
+    author_can_dismiss: bool = False  # whether a PR's author may dismiss findings on their own PR
 
     def ignores(self, path: str) -> bool:
         """Whether a path matches an `ignore` pattern. `*` matches across directories, so `docs/*`

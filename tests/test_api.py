@@ -199,3 +199,38 @@ def test_redirects_to_the_same_host_keep_credentials():
 
 def test_redirects_away_from_https_are_refused():
     assert _redirect("https://api.github.com/x", "http://api.github.com/y") is None
+
+
+def test_permission_lookup(respond_with):
+    respond_with((200, {"permission": "write"}), (404, {"message": "Not Found"}))
+    assert github().permission("maintainer") == "write"
+    assert github().permission("stranger") == "none"
+
+
+def thread(body, login, resolved=True, author="Bot"):
+    return {
+        "isResolved": resolved,
+        "resolvedBy": {"login": login} if login else None,
+        "comments": {"nodes": [{"body": body, "author": {"__typename": author}}]},
+    }
+
+
+def page(nodes, after=None):
+    info = {"hasNextPage": after is not None, "endCursor": after}
+    return {"data": {"repository": {"pullRequest": {"reviewThreads": {"pageInfo": info, "nodes": nodes}}}}}
+
+
+def test_resolved_threads_keeps_resolved_bot_threads_across_pages(respond_with):
+    calls = respond_with(
+        (200, page([thread("<!-- lisa:1 -->", "rev"), thread("<!-- lisa:2 -->", None, resolved=False)], after="c1")),
+        (200, page([thread("human note", "rev", author="User"), thread("<!-- lisa:3 -->", "lead")])),
+    )
+    assert github().resolved_threads(7) == [("<!-- lisa:1 -->", "rev"), ("<!-- lisa:3 -->", "lead")]
+    assert calls[0][1] == "https://api.github.com/graphql"
+    assert calls[1][3]["variables"]["after"] == "c1"
+
+
+def test_graphql_errors_are_api_errors(respond_with):
+    respond_with((200, {"errors": [{"message": "Could not resolve to a PullRequest"}]}))
+    with pytest.raises(ApiError, match="GraphQL query for review threads failed"):
+        github().resolved_threads(7)

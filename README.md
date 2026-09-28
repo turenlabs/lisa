@@ -16,7 +16,9 @@ Lisa is a GitHub Action that reviews every pull request with [TypeSafe](https://
 
 A repository can add its own questions, about each part of the diff or about the pull request as a whole, turn checks off, and skip paths in a [`.lisa.toml`](#configuration-lisatoml) file.
 
-For every finding, Lisa comments on the exact line with what is wrong and how to fix it. It also keeps one summary comment on the PR up to date. Lisa runs on the Python standard library alone and installs nothing at run time.
+For every finding, Lisa comments on the exact line with what is wrong and how to fix it. It also keeps one summary comment on the PR up to date. A maintainer can [dismiss](#dismissing-a-finding) a finding they have reviewed and accepted. Lisa runs on the Python standard library alone and installs nothing at run time.
+
+Checks are matched to the kind of file. Every file is checked for secrets and prompt injection. Prose (Markdown, text) gets only those two. Config and data files, and generated code, also get the security check. Only hand-written code gets the quality checks (`complexity` and `duplication`).
 
 ## Contents
 
@@ -24,6 +26,7 @@ For every finding, Lisa comments on the exact line with what is wrong and how to
 - [Inputs and outputs](#inputs-and-outputs)
 - [Configuration: .lisa.toml](#configuration-lisatoml)
 - [Results](#results)
+- [Dismissing a finding](#dismissing-a-finding)
 - [How it works](#how-it-works)
 - [Security](#security)
 - [Limits](#limits)
@@ -91,6 +94,9 @@ threshold = 0.6
 # Paths to skip. `*` matches across directories, so "docs/*" covers everything under docs.
 ignore = ["docs/*", "tests/fixtures/*"]
 
+# Allow a PR's author to dismiss findings on their own PR (default: false).
+author_can_dismiss = false
+
 # Turn built-in checks off: secret, security, complexity, prompt_injection, duplication.
 [checks]
 complexity = false
@@ -117,7 +123,7 @@ Custom questions can use any of TypeSafe's three question types. Set `type`; the
 | `choice` | which one of your options applies | the flagged options' combined probability reaches the threshold | `options` (2 to 255, required), `flag` (required), `threshold` |
 | `score` | where the change falls on your levels | the score reaches `fail_at` | `levels` (2 to 10, best first, required), `fail_at` (required) |
 
-Every type also takes `id`, `question`, `title`, `why`, `fix`, and `scope`.
+Every type also takes `id`, `question`, `title`, `why`, `fix`, `scope`, and `files`. `files` lists the kinds of file a question is asked about: `code`, `config`, `prose`, and `generated` (default: all). It applies to `scope = "diff"` questions.
 
 ```toml
 # choice: fails when "gpl" and "unknown" together are at least 60% likely.
@@ -183,7 +189,7 @@ A `choice` finding names the flagged option that was most likely, for example **
 
 **The check fails** when any of these is true:
 
-- Any question's answer fails its check: a yes (or flagged choice) at or above the threshold, or a score at or above `fail_at`.
+- Any question's answer fails its check, and no maintainer has dismissed that finding. An answer fails its check when it's a yes (or a flagged choice) at or above the threshold, or a score at or above `fail_at`.
 - Any part of the PR could not be reviewed. That covers a request that failed after retries, a missing or invalid answer, a file over 1 MB whose diff GitHub omits, files beyond GitHub's 3,000-file listing, and a push to the PR during the review.
 - `.lisa.toml` or the inputs are invalid, or the API key is rejected.
 
@@ -207,10 +213,24 @@ The summary comment contains:
 
 Lisa edits the same summary comment on every push. It does not repeat an inline comment for a problem it has already flagged, even if the line moved. The same summary is written to the job summary.
 
+## Dismissing a finding
+
+When a finding is wrong, or the team accepts it, a maintainer **resolves Lisa's comment** on it. On the next run, Lisa treats that finding as dismissed: it no longer fails the check, and the summary lists it as dismissed, with who dismissed it. Re-run the Lisa job, or push, to update the check.
+
+- **Only someone with write access** to the repository can dismiss. By default that must be someone other than the PR's author, so the author can't clear their own findings. Set `author_can_dismiss = true` in `.lisa.toml` to allow it.
+- **A dismissal covers the flagged code as it is.** Findings are identified by the content of the flagged line. If that line changes, Lisa reviews it afresh.
+- **Only findings with an inline comment can be dismissed.** Findings about the PR as a whole, or its description, have no comment to resolve.
+- **If Lisa cannot check dismissals** (for example because the GitHub API fails), it dismisses nothing and says so.
+
 ## How it works
 
 1. **Settings.** Validate the inputs, read the PR from the workflow event, and load `.lisa.toml` from the base commit.
 2. **Files.** List the PR's changed files through the GitHub API, then confirm the PR head has not moved. Skip lockfiles, binaries, minified bundles, vendored code, and `ignore` paths, and list them in the summary. Deleted files are reviewed too: removing a security check is a change. When GitHub omits a large file's diff, download both versions (at most 1 MB each) and rebuild the diff.
+   Each reviewed file gets a kind that decides which checks it's asked:
+   - `prose`: Markdown and text;
+   - `config`: JSON, YAML, TOML and similar;
+   - `generated`: marked `linguist-generated` in the base branch's `.gitattributes`, named like generated code (`*.gen.ts`, `*_pb2.py`, `*.pb.go`, `__generated__/`), or starting with a marker such as `@generated` or `DO NOT EDIT`;
+   - `code`: everything else.
 3. **Chunks.** Split each diff into chunks of at most 12,000 characters and 200 added lines. Jev is most accurate on short, focused input. Nothing is hidden from it:
    - long lines are split into segments, not cut off;
    - runs of 64 or more spaces are collapsed to `<N spaces>`;
@@ -222,7 +242,8 @@ Lisa edits the same summary comment on every push. It does not repeat an inline 
 5. **Pull request.** Ask the `scope = "pr"` questions once, about the title, description, and a summary of every changed file and directory.
 6. **Duplicates.** Find pairs of files that look alike: the same file name in different directories, or many of the same added lines. Prose and data files are not compared. Jev then compares each pair side by side (up to 20 pairs), and a finding is placed on the second file, naming the first.
 7. **Description.** Check the PR title and the whole description for prompt injection.
-8. **Publish.** Write the summary comment, the inline comments, the job summary, and the `findings` output. Exit `1` on any finding or gap in coverage.
+8. **Dismissals.** Treat findings whose comments a maintainer has resolved as dismissed.
+9. **Publish.** Write the summary comment, the inline comments, the job summary, and the `findings` output. Exit `1` on any finding or gap in coverage.
 
 Network errors, rate limits (429), and overloads (529) are retried with exponential backoff, honoring `retry-after`.
 
@@ -231,6 +252,8 @@ Network errors, rate limits (429), and overloads (529) are retried with exponent
 Lisa is a security gate, so it is built to be hard to fool or abuse:
 
 - **Everything from the PR is treated as hostile.** That covers diffs, file names, the title, the description, and comments. It is sent to Jev as data, rendered in comments only inside escaped code spans, and escaped in every workflow command it prints. A crafted file name cannot add links, mentions, fake headings, or `::` commands.
+- **A file's kind never removes security coverage.** File names and headers come from the PR author, so calling a file "generated" only turns off the quality checks. A file that claims to be generated still gets the `secret`, `security`, and `prompt_injection` checks.
+- **Dismissals need a second person with write access** by default, and last only while the flagged line is unchanged.
 - **Only bot-authored comments count as Lisa's.** Anyone can post Lisa's hidden markers; that cannot hide or replace its comments. The check status, not any comment, is the result.
 - **Nothing sensitive is logged.** Logs contain counts, check names, file paths, and error summaries. They never contain diff content, PR text, API response bodies, or credentials. The API key is never printed, so pass it from a secret; GitHub masks secrets in logs.
 - **Credentials stay put.** HTTPS only. Credentials are never forwarded on a redirect to another host, and redirects away from HTTPS are refused.
@@ -280,6 +303,7 @@ The code is organized as follows. Every module in `lisa/` has one job:
 | `lisa/config.py` | Parses and validates the inputs, the workflow event, and `.lisa.toml`. |
 | `lisa/diff.py` | Parses patches, splits them into chunks, and reveals hidden characters. |
 | `lisa/duplicates.py` | Finds pairs of files that may duplicate each other, for the `duplication` check. |
+| `lisa/files.py` | Decides how each file is treated: skipped, or reviewed as code, config, prose, or generated code. |
 | `lisa/api.py` | GitHub and TypeSafe clients: retries, size limits, safe redirects, and error messages without bodies. |
 | `lisa/report.py` | Renders the summary and inline comments as markdown. |
 | `lisa/errors.py` | `LisaError` and its subclasses: `ConfigError`, `ApiError`, `AuthError`. |
@@ -313,8 +337,9 @@ These rules keep Lisa safe. Tests and CI enforce most of them:
 5. **Read settings from the base commit only.**
 6. **Data structures go in `models.py`,** and built-in checks go in `default_checks.py`.
 7. **Pin CI actions to full commit SHAs,** with the version in a comment.
-8. **Add a test for every behavior change.** For a security fix, add a test that fails without the fix.
-9. **No emojis** in code, comments, or output.
+8. **Add a test for every behavior change.** For a security fix, add a test that fails without the fix. The fake TypeSafe in `tests/test_review.py` rejects any request the real API would (`tests/typesafe_schema.py`); keep that schema in step with TypeSafe's API reference.
+9. **A file's kind may only remove quality checks.** Never let a file name or header, which the PR author controls, turn off `secret`, `security`, or `prompt_injection`.
+10. **No emojis** in code, comments, or output.
 
 **To add a built-in check,** add a `Check` to `DEFAULT_CHECKS` in `lisa/default_checks.py`. It needs:
 

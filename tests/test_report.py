@@ -140,3 +140,13 @@ def test_pull_request_findings_are_labeled_as_such():
     finding = Finding(check, check.kinds["other"], "", 0, 0.8)
     body = render_summary("m", review([finding], Coverage(1, 1, 1), checks=DEFAULT_CHECKS.extended([check])))
     assert "- Pull request: **Scope** (80%)." in body
+
+
+def test_dismissed_findings_are_listed_but_do_not_fail():
+    dismissed = replace(SQLI, dismissed_by="reviewer")
+    body = render_summary("m", review([dismissed], Coverage(1, 1, 1, generated=["gen/types.gen.ts"])))
+    assert "## Lisa review: passed" in body
+    assert "| Security vulnerability | Clear (1 dismissed) |" in body
+    assert f"- [`src/db.py:7`]({BLOB}/src/db.py#L7) **Injection**, dismissed by `reviewer`." in body
+    assert "### Security vulnerability" not in body
+    assert "Reviewed as generated code, without the quality checks: `gen/types.gen.ts`" in body

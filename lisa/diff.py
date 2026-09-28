@@ -21,25 +21,6 @@ HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 LONG_WHITESPACE = re.compile(r"[ \t]{64,}")
 INVISIBLE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\U000e0000-\U000e007f]")
 
-SKIPPED = [
-    re.compile(
-        r"(^|/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock"
-        r"|poetry\.lock|uv\.lock|Pipfile\.lock|go\.sum|composer\.lock|Gemfile\.lock)$"
-    ),
-    re.compile(r"\.min\.(js|css)$"),
-    re.compile(r"\.(map|snap|svg)$"),
-    re.compile(r"(^|/)(node_modules|vendor)/"),
-    re.compile(
-        r"\.(png|jpe?g|gif|webp|ico|bmp|tiff?|pdf|zip|gz|tgz|bz2|xz|7z|rar|jar|war|class|woff2?|ttf|otf|eot"
-        r"|mp[34]|mov|avi|webm|wav|ogg|flac|wasm|so|dylib|dll|exe|bin|o|a|pyc|db|sqlite)$",
-        re.IGNORECASE,
-    ),
-]
-
-
-def should_skip(filename: str) -> bool:
-    return any(pattern.search(filename) for pattern in SKIPPED)
-
 
 def reveal_invisible(text: str) -> str:
     return INVISIBLE.sub(lambda match: f"<U+{ord(match[0]):04X}>", text)

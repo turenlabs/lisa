@@ -1,4 +1,5 @@
-from lisa.diff import MAX_LINE_CHARS, chunk_file, parse_patch, reveal_invisible, should_skip, unified_patch
+from lisa.diff import MAX_LINE_CHARS, chunk_file, parse_patch, reveal_invisible, unified_patch
+from lisa.files import should_skip
 
 PATCH = """@@ -10,3 +10,4 @@ def a():
  x = 1

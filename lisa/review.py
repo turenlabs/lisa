@@ -21,9 +21,10 @@ from lisa.checks import (
 )
 from lisa.config import REPO_CONFIG_PATH, load_config, load_pull_request, parse_repo_config
 from lisa.default_checks import DESCRIPTION_CHECK
-from lisa.diff import chunk_file, reveal_invisible, should_skip, unified_patch
+from lisa.diff import chunk_file, parse_patch, reveal_invisible, unified_patch
 from lisa.duplicates import candidate_pairs, pair_state
 from lisa.errors import ApiError, AuthError, LisaError
+from lisa.files import file_kind, generated_rules, header_lines, should_skip
 from lisa.models import CheckCatalog, Chunk, Config, Coverage, Finding, Line, PullRequest, RepoConfig, ReviewResult
 from lisa.report import marker, render_inline, render_summary
 
@@ -93,7 +94,7 @@ class Reviewer:
         self.config = config
         self.pr = pr
         self.log = log
-        self.github = GitHub(config.github_token, config.api_url, config.repo)
+        self.github = GitHub(config.github_token, config.api_url, config.repo, config.graphql_url)
         self.typesafe = TypeSafe(config.api_key, config.model)
         self.coverage = Coverage(files_changed=pr.changed_files)
         self.model = config.model  # replaced by the exact version TypeSafe reports
@@ -103,6 +104,8 @@ class Reviewer:
         self.settings = "defaults"
         self.files: list[dict] = []  # every changed file, as GitHub lists them
         self.added: dict[str, list[Line]] = {}  # added lines of each reviewed file
+        self.kinds: dict[str, str] = {}  # the kind of each reviewed file (see lisa.files)
+        self.generated_rules: tuple[tuple[str, bool], ...] = ()  # from the base branch's .gitattributes
 
     def warn(self, message: str):
         self.log(command("warning", message))
@@ -110,15 +113,18 @@ class Reviewer:
     def run(self) -> int:
         self.load_repo_config()
         chunks = self.collect_chunks()
-        pairs = candidate_pairs(self.added) if "duplication" in self.checks else []
+        pairs = []
+        if "duplication" in self.checks:
+            pairs = candidate_pairs({file: lines for file, lines in self.added.items() if self.kinds[file] == "code"})
         self.check_budget(chunks, pairs)
         self.log(f"Reviewing {self.coverage.files_reviewed} files in {len(chunks)} chunks with {self.config.model}.")
         findings = self.review(chunks) + self.review_pull_request() + self.review_duplicates(pairs)
-        findings += self.review_description()
+        findings = self.apply_dismissals(findings + self.review_description())
         self.publish(findings)
 
-        if findings or not self.coverage.complete:
-            problems = [f"{len(findings)} issue(s)"] if findings else []
+        active = [f for f in findings if not f.dismissed_by]
+        if active or not self.coverage.complete:
+            problems = [f"{len(active)} issue(s)"] if active else []
             if not self.coverage.complete:
                 problems.append("parts of the pull request that could not be reviewed")
             self.log(command("error", f"Lisa found {' and '.join(problems)}."))
@@ -127,8 +133,11 @@ class Reviewer:
         return 0
 
     def load_repo_config(self):
-        """Reads .lisa.toml from the base branch, never from the pull request, so a pull request
-        cannot switch off the checks that would catch it."""
+        """Reads .lisa.toml and .gitattributes from the base branch, never from the pull request,
+        so a pull request cannot switch off the checks that would catch it."""
+        attributes = self.github.file_content(".gitattributes", self.pr.base)
+        if attributes:
+            self.generated_rules = generated_rules(attributes.decode("utf-8", "replace"))
         content = self.github.file_content(REPO_CONFIG_PATH, self.pr.base)
         if content is None:
             return
@@ -160,9 +169,15 @@ class Reviewer:
         chunks: list[Chunk] = []
         with ThreadPoolExecutor(CONCURRENCY) as pool:
             for f, patch in zip(candidates, pool.map(self._load_patch, candidates), strict=True):
-                if patch is not None:
-                    self.coverage.files_reviewed += 1
-                    chunks += chunk_file(f["filename"], patch)
+                if patch is None:
+                    continue
+                name = f["filename"]
+                self.coverage.files_reviewed += 1
+                lines = [line for hunk in parse_patch(patch) for line in hunk]
+                self.kinds[name] = file_kind(name, header_lines(lines), self.generated_rules)
+                if self.kinds[name] == "generated":
+                    self.coverage.generated.append(name)
+                chunks += chunk_file(name, patch)
         for chunk in chunks:
             self.added.setdefault(chunk.file, []).extend(chunk.added)
         self.coverage.chunks = len(chunks)
@@ -204,7 +219,7 @@ class Reviewer:
             return -(-len(checks) // CHECKS_PER_REQUEST)
 
         needed = (
-            len(chunks) * requests(self.checks.scoped("diff"))
+            sum(requests(self._checks_for(chunk)) for chunk in chunks)
             + requests(self.checks.scoped("pr"))
             + len(pairs)
             + len(self._description_pieces())
@@ -236,10 +251,16 @@ class Reviewer:
                     findings += result
         return findings
 
+    def _checks_for(self, chunk: Chunk) -> CheckCatalog:
+        """The diff-scope checks that apply to this chunk's kind of file."""
+        kind = self.kinds.get(chunk.file, "code")
+        return CheckCatalog(tuple(check for check in self.checks.scoped("diff") if kind in check.files))
+
     def _review_chunk(self, chunk: Chunk) -> list[Finding] | None:
         """The chunk's findings, or None if it could not be reviewed. A rejected key stops the whole review."""
         try:
-            return self._ask(state_for(chunk), chunk, self.checks.scoped("diff"))
+            checks = self._checks_for(chunk)
+            return self._ask(state_for(chunk), chunk, checks) if checks else []
         except AuthError:
             raise
         except ApiError as error:
@@ -311,6 +332,34 @@ class Reviewer:
                 return findings
         return []
 
+    def apply_dismissals(self, findings: list[Finding]) -> list[Finding]:
+        """Marks findings a maintainer has accepted by resolving Lisa's comment on them. The
+        resolver needs write access to the repository and, unless .lisa.toml sets
+        author_can_dismiss, must not be the pull request's author. A dismissal holds only while
+        the flagged line is unchanged, since findings are identified by content. If the lookup
+        fails, nothing is dismissed."""
+        if not any(f.located for f in findings):
+            return findings
+        try:
+            resolved = {body.split("\n", 1)[0]: login for body, login in self.github.resolved_threads(self.pr.number)}
+            allowed: dict[str, bool] = {}
+            for login in set(resolved.values()):
+                own = login == self.pr.author and not self.repo_config.author_can_dismiss
+                allowed[login] = not own and self.github.permission(login) in ("admin", "maintain", "write")
+        except AuthError:
+            raise
+        except ApiError as error:
+            self.warn(f"Could not check for dismissed findings, so none are dismissed: {error}")
+            return findings
+        dismissed = []
+        for f in findings:
+            login = resolved.get(marker(f)) if f.located else None
+            dismissed.append(replace(f, dismissed_by=login) if login and allowed[login] else f)
+        count = sum(1 for f in dismissed if f.dismissed_by)
+        if count:
+            self.log(f"{count} finding(s) dismissed by maintainers.")
+        return dismissed
+
     def publish(self, findings: list[Finding]):
         review = ReviewResult(
             checks=self.checks,
@@ -322,10 +371,10 @@ class Reviewer:
             settings=self.settings,
         )
         _append(self.config.summary_path, render_summary(SUMMARY_MARKER, review, max_chars=JOB_SUMMARY_CHARS))
-        _append(self.config.output_path, f"findings={len(findings)}\n")
+        _append(self.config.output_path, f"findings={len(review.active)}\n")
         try:
             self.github.upsert_comment(self.pr.number, SUMMARY_MARKER, render_summary(SUMMARY_MARKER, review))
-            self._post_inline_comments([f for f in findings if f.located])
+            self._post_inline_comments([f for f in review.active if f.located])
         except ApiError as error:
             # A read-only token (for example on fork PRs) cannot comment; the job summary still has the results.
             self.warn(f"Could not post review comments: {error}")

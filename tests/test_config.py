@@ -252,3 +252,31 @@ def test_questions_default_to_diff_scope_and_accept_pr_scope():
 def test_an_unknown_scope_is_explained():
     with pytest.raises(ConfigError, match=r"scope must be one of diff, pr"):
         parse_repo_config('[[questions]]\nid = "a"\nscope = "pairs"\nquestion = "A?"')
+
+
+def test_author_can_dismiss_and_question_file_kinds():
+    config = parse_repo_config(
+        'author_can_dismiss = true\n[[questions]]\nid = "a"\nquestion = "A?"\nfiles = ["code"]\n'
+    )
+    assert config.author_can_dismiss is True
+    assert config.questions[0].files == ("code",)
+    assert parse_repo_config("").author_can_dismiss is False
+
+
+@pytest.mark.parametrize(
+    "text, message",
+    [
+        ('author_can_dismiss = "yes"', "author_can_dismiss"),
+        ('[[questions]]\nid = "a"\nquestion = "A?"\nfiles = ["scripts"]', "files must list file kinds"),
+        ('[[questions]]\nid = "a"\nquestion = "A?"\nfiles = []', "files must list file kinds"),
+        ('[[questions]]\nid = "a"\nscope = "pr"\nquestion = "A?"\nfiles = ["code"]', "only to scope"),
+    ],
+)
+def test_invalid_dismissal_and_file_settings_are_explained(text, message):
+    with pytest.raises(ConfigError, match=message):
+        parse_repo_config(text)
+
+
+def test_the_pull_request_author_is_read_from_the_event(tmp_path):
+    event = {"pull_request": {"number": 7, "head": {"sha": "h"}, "base": {"sha": "b"}, "user": {"login": "octo"}}}
+    assert load_pull_request(write(tmp_path, json.dumps(event))).author == "octo"

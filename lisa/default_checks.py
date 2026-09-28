@@ -1,5 +1,8 @@
 """Lisa's built-in checks. Look one up with DEFAULT_CHECKS["secret"], or find checks with
-DEFAULT_CHECKS.search("injection")."""
+DEFAULT_CHECKS.search("injection").
+
+`secret` and `prompt_injection` apply to every kind of file, `security` to everything but prose,
+and the quality checks (`complexity`, `duplication`) only to hand-written code."""
 
 from dataclasses import replace
 
@@ -72,6 +75,7 @@ DEFAULT_CHECKS = CheckCatalog(
         ),
         Check(
             key="security",
+            files=frozenset({"code", "config", "generated"}),
             title="Security vulnerability",
             instructions="Does this diff introduce a security vulnerability?",
             criteria={
@@ -175,6 +179,7 @@ DEFAULT_CHECKS = CheckCatalog(
         ),
         Check(
             key="complexity",
+            files=frozenset({"code"}),
             title="Unneeded complexity",
             instructions="Does this diff add unneeded complexity?",
             criteria={
@@ -283,6 +288,7 @@ DEFAULT_CHECKS = CheckCatalog(
         # directories, or many shared lines), not about single chunks.
         Check(
             key="duplication",
+            files=frozenset({"code"}),
             title="Duplicated code",
             instructions="Do `code_a` and `code_b` implement the same functionality?",
             criteria={

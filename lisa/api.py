@@ -83,7 +83,8 @@ class JsonClient:
         headers = {**self.headers, "Accept": accept} if accept else self.headers
         for attempt in range(1, self.attempts + 1):
             try:
-                response = send(method, self.base_url + path, headers, payload, limit=limit)
+                url = path if path.startswith("https://") else self.base_url + path
+                response = send(method, url, headers, payload, limit=limit)
             except OSError as error:
                 if attempt == self.attempts:
                     raise ApiError(f"Could not reach {self.service}: {type(error).__name__}") from error
@@ -151,7 +152,9 @@ class GitHub(JsonClient):
     # The pull request files endpoint returns at most this many files.
     MAX_LISTED_FILES = 3000
 
-    def __init__(self, token: str, api_url: str, repo: str):
+    def __init__(self, token: str, api_url: str, repo: str, graphql_url: str = "https://api.github.com/graphql"):
+        self.repo = repo
+        self.graphql_url = graphql_url
         super().__init__(
             f"{api_url}/repos/{repo}",
             {
@@ -202,6 +205,53 @@ class GitHub(JsonClient):
             if error.status == 404:
                 return None
             raise
+
+    def permission(self, login: str) -> str:
+        """The user's permission on the repository: admin, maintain, write, triage, read, or none."""
+        try:
+            data = parse_json(self.request("GET", f"/collaborators/{quote(login, safe='')}/permission"))
+        except ApiError as error:
+            if error.status == 404:
+                return "none"
+            raise
+        return str(data.get("permission") or "none") if isinstance(data, dict) else "none"
+
+    def resolved_threads(self, pr: int) -> list[tuple[str, str]]:
+        """(first comment, resolver login) for each resolved review thread a bot started."""
+        owner, name = self.repo.split("/", 1)
+        query = """
+        query($owner: String!, $name: String!, $number: Int!, $after: String) {
+          repository(owner: $owner, name: $name) {
+            pullRequest(number: $number) {
+              reviewThreads(first: 100, after: $after) {
+                pageInfo { hasNextPage endCursor }
+                nodes {
+                  isResolved
+                  resolvedBy { login }
+                  comments(first: 1) { nodes { body author { __typename } } }
+                }
+              }
+            }
+          }
+        }"""
+        threads, after = [], None
+        while True:
+            variables = {"owner": owner, "name": name, "number": pr, "after": after}
+            data = parse_json(self.request("POST", self.graphql_url, {"query": query, "variables": variables}))
+            try:
+                if data.get("errors"):
+                    raise ApiError("GitHub GraphQL query for review threads failed.")
+                page = data["data"]["repository"]["pullRequest"]["reviewThreads"]
+            except (AttributeError, KeyError, TypeError) as error:
+                raise ApiError("GitHub returned unexpected review thread data.") from error
+            for thread in page["nodes"] or []:
+                first = ((thread.get("comments") or {}).get("nodes") or [{}])[0]
+                resolver = (thread.get("resolvedBy") or {}).get("login")
+                if thread.get("isResolved") and resolver and (first.get("author") or {}).get("__typename") == "Bot":
+                    threads.append((first.get("body") or "", resolver))
+            if not page["pageInfo"]["hasNextPage"]:
+                return threads
+            after = page["pageInfo"]["endCursor"]
 
     def _own_comments(self, path: str) -> list[dict]:
         """Comments written by a bot, such as github-actions[bot] or an app. Anyone can write a

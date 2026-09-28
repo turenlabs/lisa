@@ -66,14 +66,17 @@ def render_inline(f: Finding, model: str) -> str:
     return "\n\n".join(part for part in parts if part)
 
 
+def _location(f: Finding, blob_url: str) -> str:
+    if not f.file:
+        return "Pull request description:" if f.check.key == "prompt_injection" else "Pull request:"
+    return f"[{code(f'{f.file}:{f.line}')}]({blob_url}/{quote(f.file)}#L{f.line})"
+
+
 def _summary_item(f: Finding, blob_url: str) -> str:
     label = f"**{f.kind.label}** ({_strength(f)})."
     if f.related:
         label += f" Also in {code(f.related)}."
-    if not f.file:
-        where = "Pull request description:" if f.check.key == "prompt_injection" else "Pull request:"
-    else:
-        where = f"[{code(f'{f.file}:{f.line}')}]({blob_url}/{quote(f.file)}#L{f.line})"
+    where = _location(f, blob_url)
     # Findings without an inline comment carry their explanation here.
     explanation = f.kind.fix if f.located else f"{f.kind.why} {f.kind.fix}"
     return f"- {where} {label} {explanation}"
@@ -84,8 +87,10 @@ def render_summary(comment_marker: str, review: ReviewResult, max_chars: int = M
     head = [comment_marker, f"## Lisa review: {'passed' if review.passed else 'changes needed'}", ""]
     head += ["| Check | Result |", "|---|---|"]
     for check in review.checks:
-        n = sum(f.check.key == check.key for f in review.findings)
-        head.append(f"| {check.title} | {f'**{n} found**' if n else 'Clear'} |")
+        n = sum(f.check.key == check.key for f in review.active)
+        dismissed = sum(f.check.key == check.key and bool(f.dismissed_by) for f in review.findings)
+        result = f"**{n} found**" if n else "Clear"
+        head.append(f"| {check.title} | {result}{f' ({dismissed} dismissed)' if dismissed else ''} |")
     head += [
         "",
         f"Reviewed {coverage.files_reviewed:,} of {_plural(coverage.files_changed, 'changed file')} "
@@ -110,13 +115,27 @@ def render_summary(comment_marker: str, review: ReviewResult, max_chars: int = M
                 f"{_code_list(coverage.failed)}. Re-run the job to retry."
             )
         tail += ["", "Lisa fails the check until every file has been reviewed."]
+    dismissed = [f for f in review.findings if f.dismissed_by]
+    if dismissed:
+        tail += ["", "### Dismissed", ""]
+        tail += [
+            f"- {_location(f, review.blob_url)} **{f.kind.label}**, dismissed by {code(f.dismissed_by)}."
+            for f in dismissed[:MAX_LISTED]
+        ]
+        if len(dismissed) > MAX_LISTED:
+            tail.append(f"- and {len(dismissed) - MAX_LISTED:,} more.")
+    if coverage.generated:
+        tail += [
+            "",
+            f"<sub>Reviewed as generated code, without the quality checks: {_code_list(coverage.generated)}.</sub>",
+        ]
     if coverage.skipped:
         tail += [
             "",
-            f"<sub>Skipped by design (lockfiles, binaries, generated, vendored, or ignored in .lisa.toml): "
+            f"<sub>Skipped by design (lockfiles, binaries, minified, vendored, or ignored in .lisa.toml): "
             f"{_code_list(coverage.skipped)}.</sub>",
         ]
-    if any(f.located for f in review.findings):
+    if any(f.located for f in review.active):
         tail += ["", "<sub>Inline comments on the diff explain each finding and how to fix it.</sub>"]
 
     # Findings are listed until the comment would exceed GitHub's size limit.
@@ -125,7 +144,7 @@ def render_summary(comment_marker: str, review: ReviewResult, max_chars: int = M
     omitted = 0
     for check in review.checks:
         section = ["", f"### {check.title}", ""]
-        for f in (f for f in review.findings if f.check.key == check.key):
+        for f in (f for f in review.active if f.check.key == check.key):
             item = _summary_item(f, review.blob_url)
             cost = len(item) + sum(len(line) + 1 for line in section)
             if cost > budget:
