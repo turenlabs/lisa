@@ -97,9 +97,11 @@ ignore = ["docs/*", "tests/fixtures/*"]
 # Allow a PR's author to dismiss findings on their own PR (default: false).
 author_can_dismiss = false
 
-# Turn built-in checks off: secret, security, complexity, prompt_injection, duplication.
+# Built-in checks: secret, security, complexity, prompt_injection, duplication.
+# `false` turns a check off; a number gives that check its own threshold (see "Per-check thresholds").
 [checks]
-complexity = false
+duplication = false
+complexity = 0.7
 
 # Your own questions, asked about every part of the diff (up to 20). See "Question types" below.
 [[questions]]
@@ -112,6 +114,10 @@ why = "Debug output ends up in production logs."                       # optiona
 fix = "Remove it or use the logger."                                   # optional: shown to the author
 threshold = 0.8                    # optional: overrides the threshold for this question
 ```
+
+### Per-check thresholds
+
+`threshold` applies to every built-in check. To make one check stricter or looser without touching the rest, set a number under `[checks]`, such as `complexity = 0.7`. Findings for that check then need at least that probability to fail the PR. Checks you do not list keep the review-wide threshold.
 
 ### Question types
 

@@ -5,6 +5,7 @@ A missing or invalid answer to a deciding question is an error, never a pass: tr
 
 import math
 from collections import defaultdict
+from dataclasses import replace
 
 from lisa.default_checks import DEFAULT_CHECKS
 from lisa.diff import reveal_invisible
@@ -61,13 +62,17 @@ def custom_check(question: CustomQuestion) -> Check:
 
 def build_checks(repo_config: RepoConfig) -> CheckCatalog:
     """The built-in checks the repository has not disabled, followed by its custom questions."""
-    unknown = repo_config.disabled - set(DEFAULT_CHECKS.keys())
+    unknown = (repo_config.disabled | repo_config.check_thresholds.keys()) - set(DEFAULT_CHECKS.keys())
     if unknown:
         raise ConfigError(
-            f".lisa.toml disables unknown check(s) {', '.join(sorted(unknown))}; "
+            f".lisa.toml configures unknown check(s) {', '.join(sorted(unknown))}; "
             f"built-in checks are {', '.join(DEFAULT_CHECKS.keys())}."
         )
-    return DEFAULT_CHECKS.without(repo_config.disabled).extended(custom_check(q) for q in repo_config.questions)
+    built_in = (
+        replace(check, threshold=repo_config.check_thresholds.get(check.key, check.threshold))
+        for check in DEFAULT_CHECKS.without(repo_config.disabled)
+    )
+    return CheckCatalog(tuple(built_in)).extended(custom_check(q) for q in repo_config.questions)
 
 
 def _deciding_question(check: Check) -> dict:

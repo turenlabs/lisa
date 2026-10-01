@@ -254,6 +254,7 @@ class RepoConfig:
     threshold: float | None = None
     ignore: tuple[str, ...] = ()
     disabled: frozenset[str] = frozenset()
+    check_thresholds: dict[str, float] = field(default_factory=dict)  # built-in check -> its own threshold
     questions: tuple[CustomQuestion, ...] = ()
     author_can_dismiss: bool = False  # whether a PR's author may dismiss findings on their own PR
 

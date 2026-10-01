@@ -60,6 +60,28 @@ def test_build_checks_disables_and_adds_checks():
     assert checks.keys() == ["secret", "security", "prompt_injection", "duplication", "custom_debug-prints"]
 
 
+def test_build_checks_applies_per_check_thresholds_to_built_in_checks_only():
+    checks = build_checks(RepoConfig(check_thresholds={"complexity": 0.7}))
+    assert {check.key: check.threshold for check in checks} == {
+        "secret": None,
+        "security": None,
+        "complexity": 0.7,
+        "prompt_injection": None,
+        "duplication": None,
+    }
+
+
+def test_a_per_check_threshold_changes_only_that_checks_findings():
+    answers = {**NO, "complexity": {"noul": 0.6}, "secret": {"noul": 0.6}}
+    checks = build_checks(RepoConfig(check_thresholds={"complexity": 0.7}))
+    assert [f.check.key for f in findings_for(CHUNK, answers, checks, threshold=0.5)] == ["secret"]
+
+
+def test_build_checks_rejects_thresholds_for_unknown_checks():
+    with pytest.raises(ConfigError, match="unknown check.*complexty"):
+        build_checks(RepoConfig(check_thresholds={"complexty": 0.7}))
+
+
 def test_build_checks_rejects_unknown_check_names():
     with pytest.raises(ConfigError, match="unknown check.*complexty"):
         build_checks(RepoConfig(disabled=frozenset({"complexty"})))

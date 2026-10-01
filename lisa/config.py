@@ -97,8 +97,12 @@ def parse_repo_config(text: str) -> RepoConfig:
         raise ConfigError(f"`ignore` in {REPO_CONFIG_PATH} must be a list of path patterns.")
 
     checks = data.get("checks") or {}
-    if not isinstance(checks, dict) or not all(isinstance(enabled, bool) for enabled in checks.values()):
-        raise ConfigError(f"`checks` in {REPO_CONFIG_PATH} must set built-in check names to true or false.")
+    if not isinstance(checks, dict) or not all(
+        isinstance(setting, (bool, int, float)) and not isinstance(setting, str) for setting in checks.values()
+    ):
+        raise ConfigError(
+            f"`checks` in {REPO_CONFIG_PATH} must set built-in check names to true, false, or a threshold."
+        )
 
     raw_questions = data.get("questions") or []
     if not isinstance(raw_questions, list):
@@ -119,7 +123,12 @@ def parse_repo_config(text: str) -> RepoConfig:
         author_can_dismiss=author_can_dismiss,
         threshold=_threshold(data["threshold"], f"`threshold` in {REPO_CONFIG_PATH}") if "threshold" in data else None,
         ignore=tuple(ignore),
-        disabled=frozenset(str(name) for name, enabled in checks.items() if not enabled),
+        disabled=frozenset(str(name) for name, setting in checks.items() if setting is False),
+        check_thresholds={
+            str(name): _threshold(setting, f"`checks.{name}` in {REPO_CONFIG_PATH}")
+            for name, setting in checks.items()
+            if not isinstance(setting, bool)
+        },
         questions=questions,
     )
 

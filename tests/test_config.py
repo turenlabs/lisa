@@ -67,6 +67,7 @@ ignore = ["docs/*"]
 [checks]
 complexity = false
 secret = true
+security = 0.8
 
 [[questions]]
 id = "debug-prints"
@@ -89,6 +90,7 @@ def test_parses_a_full_repo_config():
     assert config.threshold == 0.7
     assert config.ignore == ("docs/*",)
     assert config.disabled == frozenset({"complexity"})
+    assert config.check_thresholds == {"security": 0.8}
     debug, todo = config.questions
     assert debug == CustomQuestion(
         id="debug-prints",
@@ -116,7 +118,8 @@ def test_empty_repo_config_uses_defaults(text):
         ("threshold = 2", "threshold"),
         ("threshold = true", "threshold"),
         ('ignore = "docs/*"', "`ignore`.*list"),
-        ('[checks]\ncomplexity = "off"', "`checks`.*true or false"),
+        ('[checks]\ncomplexity = "off"', "`checks`.*true, false, or a threshold"),
+        ("[checks]\ncomplexity = 2", "checks.complexity"),
         ('questions = "nope"', "`questions`.*array of tables"),
         ('questions = ["just a string"]', r"questions\[0\].*table"),
         ('[[questions]]\nquestion = "Missing id?"', r"questions\[0\]\.id"),
@@ -154,7 +157,8 @@ def test_every_readme_example_is_a_valid_config():
         ["scope-creep", "size"],
     ]
     assert {q.scope for q in examples[2].questions} == {"pr"}
-    assert examples[0].disabled == frozenset({"complexity"})
+    assert examples[0].disabled == frozenset({"duplication"})
+    assert examples[0].check_thresholds == {"complexity": 0.7}
     assert [q.type for q in examples[1].questions] == ["choice", "score"]
 
 
