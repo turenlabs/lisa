@@ -22,7 +22,7 @@ def test_marker_ignores_line_numbers_but_not_content():
 
 
 def test_inline_comment_explains_and_says_how_to_fix():
-    body = render_inline(SECRET, "jev-1.13.0")
+    body = render_inline(SECRET, "jev-1.14.0")
     assert body.startswith(marker(SECRET) + "\n")
     assert "**Secret: API key** (93% likely)" in body
     assert "**How to fix:** Revoke the key" in body
@@ -35,14 +35,14 @@ def test_only_secret_comments_carry_the_rotation_note():
 
 
 def test_summary_lists_each_check_and_links_findings():
-    body = render_summary("<!-- m -->", review([SECRET, SQLI], Coverage(3, 2, 4), "jev-1.13.0"))
+    body = render_summary("<!-- m -->", review([SECRET, SQLI], Coverage(3, 2, 4), "jev-1.14.0"))
     assert body.startswith("<!-- m -->\n## Lisa review: changes needed")
     assert "| Secret | **1 found** |" in body
     assert "| Security vulnerability | **1 found** |" in body
     assert "| Unneeded complexity | Clear |" in body
     assert "| Prompt injection | Clear |" in body
     assert (
-        "Reviewed 2 of 3 changed files in 4 diff chunks at commit `abc123def456` using TypeSafe `jev-1.13.0`. "
+        "Reviewed 2 of 3 changed files in 4 diff chunks at commit `abc123def456` using TypeSafe `jev-1.14.0`. "
         "Settings: defaults." in body
     )
     assert f"- [`src/db.py:7`]({BLOB}/src/db.py#L7) **Injection** (97%)." in body

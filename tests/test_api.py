@@ -111,9 +111,9 @@ def test_non_json_body_is_an_api_error_without_the_body(respond_with):
 
 
 def test_typesafe_ask_posts_the_request_and_returns_answers(respond_with):
-    calls = respond_with((200, {"model": "jev-1.13.0", "answers": {"a": {"noul": 1}}}))
+    calls = respond_with((200, {"model": "jev-1.14.0", "answers": {"a": {"noul": 1}}}))
     model, answers = api.TypeSafe("key", "jev-latest").ask({"s": 1}, {"q": 1})
-    assert (model, answers) == ("jev-1.13.0", {"a": {"noul": 1}})
+    assert (model, answers) == ("jev-1.14.0", {"a": {"noul": 1}})
     method, url, headers, payload, _ = calls[0]
     assert (method, url) == ("POST", "https://api.typesafe.ai/v1/systemone")
     assert headers["Authorization"] == "Bearer key"
