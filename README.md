@@ -74,7 +74,7 @@ Notes on this setup:
 |---|---|---|---|
 | `api-key` | yes | | TypeSafe API key. Pass it from a secret. |
 | `threshold` | no | `threshold` from `.lisa.toml`, else `0.5` | Probability (above 0, at most 1) at which Jev's answer counts as "yes". Raise it, for example to `0.8`, to flag only clear-cut cases. |
-| `model` | no | `jev-latest` | TypeSafe model. Pin a version such as `jev-1.13.0` to keep results stable when TypeSafe releases a new model. |
+| `model` | no | `jev-latest` | TypeSafe model. Pin a version such as `jev-1.14.0` to keep results stable when TypeSafe releases a new model. |
 | `github-token` | no | `${{ github.token }}` | Token for reading the diff and writing comments. Needs `pull-requests: write` and `contents: read`. |
 
 | Output | Description |

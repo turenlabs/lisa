@@ -59,7 +59,7 @@ class FakeApis:
             gates = [key for key in payload["questions"] if not key.endswith(("_kind", "_line"))]
             answers = {key: {"type": "noul", "noul": 0.0} for key in gates}
             answers.update(self.answer_for(payload) if self.answer_for else self.answers)
-            return self._json({"model": "jev-1.13.0", "answers": answers})
+            return self._json({"model": "jev-1.14.0", "answers": answers})
         if path == "/graphql":
             if self.graphql_status != 200:
                 return self._json({"message": "Server Error"}, self.graphql_status)
